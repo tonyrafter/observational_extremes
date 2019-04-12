@@ -14,7 +14,7 @@ library(stringi)
 # register_google(api_key)
 
 plotting <- FALSE
-source("C:/Users/raf018/Documents/Programming and Computing/R/gmtColorPalettes.R")
+source("gmtColourPalettes.R")
 
 ##### SETUP VARIABLES FOR THIS ANALYSIS
 # Set period, domain and which dataset we are looking at
