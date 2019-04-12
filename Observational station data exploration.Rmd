@@ -1,0 +1,172 @@
+---
+title: "Observational data - station exploration"
+output: html_notebook
+---
+
+```{r instructions for R Notebook, include=FALSE}
+# Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+# 
+# Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+# 
+# When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+# 
+# The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+```
+
+Load required packages:
+
+```{r setup}
+library(tidyverse)
+library(maps)
+library(mapdata)
+library(bindrcpp)
+```
+
+
+## Part 1: Metadata for Water Regulations data sources
+
+Read in metadata for the stations reported through Water Regulations, and plot out their positions:
+
+```{r read in water regs metadata and plot positions}
+col_names_metadata_waterregs <- 
+  c("Station number", "Agency", "Latitude", "Longitude", "Elevation", "First Date", "First Year", 
+    "Last Date", "Last Year", "Number of Years", "Station Name")
+metadata_waterregs <- 
+  read.csv('BoMdata/Station_Metadata_FinalIFD_Water Regulations_Continuous_reimported.csv', 
+           col.names = col_names_metadata_waterregs)
+
+# Load in station lookup table from README page of water regs .xls file
+metadata_waterregs_stations <- read_csv('BoMdata/Station_Metadata_FinalIFD_Water Regulations_Continuous_README_page.csv', skip = 18, col_names = c("Agency", "OrganisationName", "State"))
+# Remove blank rows and values
+metadata_waterregs_stations <- metadata_waterregs_stations %>% drop_na()
+# Lok at the DF:
+# metadata_waterregs_stations
+
+metadata_waterregs <- merge(metadata_waterregs, metadata_waterregs_stations[,c("Agency", "OrganisationName", "State")], by = 'Agency')
+# str(metadata_waterregs)
+
+```
+
+Now we can plot up the location of these stations:
+
+```{r}
+metadata_waterregs %>% ggplot(aes(x = Longitude, y = Latitude)) + 
+  geom_point(aes(col = Number.of.Years), alpha = 0.5) +
+  ggtitle('Water Regulations Stations - coloured by length of record')
+metadata_waterregs %>% ggplot(aes(x = Longitude, y = Latitude)) +
+  ggtitle('Water Regulations Stations - coloured by first year of record') + 
+  geom_point(aes(col = First.Year), alpha = 0.5)
+metadata_waterregs %>% ggplot(aes(x = Longitude, y = Latitude)) +
+  ggtitle('Water Regulations Stations - coloured by Organisation') + 
+  geom_point(aes(col = OrganisationName), alpha = 0.5)
+
+```
+
+Some problems evident here - the projection seems to be able to be prone to change - for example in aspect ratio when a legend is added. Need a better way to plot onto actual maps in a standard projection.
+
+## Our first aside: proper maps
+
+The above maps are informative, but we can't see the outline of the Australian coast, or preserve an appropriate aspect ratio (which is fair enough as ggplot only knows it is plotting on a cartesian axis). To rectify this, we need to project on to a map.
+
+Download the `worldHires` map data: (Do we need to load Google API key first?)
+
+```{r get hi-res map data}
+# library(maps)
+# library(ggmap)
+# # Google maps API key: AIzaSyDJeNzaBarybVQ7G4-eZmgD02xAtyOiuBc
+# #api_key <- 'AIzaSyDJeNzaBarybVQ7G4-eZmgD02xAtyOiuBc'
+# #register_google(api_key)
+# ausmapdata <- map_data("worldHires", "Australia")
+# ausmap <- ggplot() + geom_polygon(data = ausmapdata, aes(x=long, y = lat, group = group), fill = "white",
+# color="black") +
+# coord_fixed(xlim = c(110, 160),  ylim = c(-45, -5), ratio = 1.1)
+# ausmap
+
+library(ggmap)
+# Google maps API key: AIzaSyDJeNzaBarybVQ7G4-eZmgD02xAtyOiuBc
+#api_key <- 'AIzaSyDJeNzaBarybVQ7G4-eZmgD02xAtyOiuBc'
+#register_google(api_key)
+
+map <- fortify(maps::map("worldHires", fill = TRUE, plot = FALSE))
+# map_data <- map_data("worldHires", fill = TRUE, plot = FALSE)
+```
+
+Create a 'basemap' of the Australian coast:
+
+```{r}
+basemap <- ggplot(data = subset(map, region == "Australia"), aes(x=long, y=lat, group = group)) +
+  geom_polygon(fill = "ivory2") +
+  geom_path(colour = "black") +
+  coord_quickmap(xlim = c(112, 156), ylim = c(-45, -10)) +
+  theme(panel.background = element_rect(fill = "#F3FFFF"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+basemap
+```
+
+Okay, now put our previous 'map' of station locations onto this hires map:
+
+
+```{r}
+basemap +
+  geom_point(inherit.aes = FALSE, data = metadata_waterregs, aes(Longitude, Latitude, color = OrganisationName), alpha = 0.6)
+```
+
+Better! We have a consistent aspect ratio, even though the legend is taking up most of the plot, and it is on a proper coastline.
+
+However, we'd like to see a bigger map and a smaller legend... There are lots of organisations/agencies involved on a national scale though, so it's hard to cut them down... unless we go by regions.
+
+```{r}
+basemap +
+  geom_point(inherit.aes = FALSE, data = metadata_waterregs, aes(Longitude, Latitude, color = OrganisationName), alpha = 0.6)
+```
+
+
+
+
+
+```{r}
+
+
+metadata_waterregs %>% ggplot(aes(x = Longitude, y = Latitude)) + 
+  geom_point(aes(col = Number.of.Years), alpha = 0.5) +
+  ggtitle('Water Regulations Stations - coloured by length of record')
+
+# Where are my domain bounds?
+syd_domain <- c(left = 148.7, right = 153.2, top = -31.9, bottom = -35.9)
+
+syd_hires_basemap <- ggplot(data = subset(map, region == "Australia"), aes(x=long, y=lat, group = group)) +
+  geom_polygon(fill = "ivory2") +
+  geom_path(colour = "black") +
+  coord_quickmap(xlim = c(syd_domain['left'], syd_domain['right']), ylim = c(syd_domain['bottom'], syd_domain['top'])) +
+  theme(panel.background = element_rect(fill = "#F3FFFF"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+syd_hires_basemap +
+  geom_point(inherit.aes = FALSE, data = metadata_waterregs, aes(Longitude, Latitude, color = OrganisationName), alpha = 0.6)
+
+```
+
+
+```{r read in water regs metadata grouped by agency, and plot positions}
+metadata_waterregs$Agency <- as.factor(metadata_waterregs$Agency)
+
+metadata_waterregs %>% group_by(Agency) %>%
+  ggplot(aes(x=Longitude, y=Latitude, col=Agency)) +
+  geom_point()
+```
+
+
+```{r read in water regs metadata grouped by agency, and plot positions with over 25 years data}
+metadata_waterregs %>% filter(Number.of.Years >= 25) %>% group_by(Agency) %>%
+  ggplot(aes(x=Longitude, y=Latitude, col=Agency)) +
+  geom_point()
+
+```
+
+```{r}
+
+```
+

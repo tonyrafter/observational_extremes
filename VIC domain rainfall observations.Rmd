@@ -1,0 +1,334 @@
+---
+title: "Analysis of VIC domain extreme rainfall observations"
+output: html_notebook
+---
+
+## Motivation
+
+We want to get a sense of how rainfall extremes - both daily and sub-daily - are represented in our downscaling runs, starting with those run using ERA Interim as the boundary forcings.
+
+To do so, we could look at the AWAP / AGCD data sets, which have 0.05 degree gridded daily rainfall, however at present both of these data sets have issues with untagged multi-day accumulations, which will be especially apparent when looking at values such as the annual maxima, or multi-year return levels (e.g. ARI-20).
+
+So instead, we will look at the rainfall observations at locations provided through the Bureau of Meteorology, which have both daily read stations and continuous measurement stations, and the data provided from the Water Regulators in various states and territories, which tend to be continuously read also.
+
+## Analysis
+
+Firstly we need to see where the stations are within our domain.
+
+Load libraries:
+```{r load libraries}
+library(tidyverse)
+library(lubridate)
+library(ggmap)
+library(maps)
+library(tmaptools)
+library(mapdata)
+library(ggmapstyles)
+
+# Google maps API key: AIzaSyDJeNzaBarybVQ7G4-eZmgD02xAtyOiuBc
+api_key <- 'AIzaSyDJeNzaBarybVQ7G4-eZmgD02xAtyOiuBc'
+register_google(api_key)
+
+```
+
+Read in station metadata:
+
+```{r Read in station metadata}
+# Water regulations stations:
+col_names_metadata_waterregs <- 
+  c("Station Number", "Agency", "Latitude", "Longitude", "Elevation", "First Date", "First Year", 
+    "Last Date", "Last Year", "Number of Years", "Station Name")
+metadata_waterregs <- 
+  read.csv('BoMdata/Station_Metadata_FinalIFD_Water Regulations_Continuous_reimported.csv', 
+           col.names = col_names_metadata_waterregs)
+
+# BoM Continuous read stations:
+col_names_metadata_bom_cont <- 
+  c("Station Number","Latitude","Longitude","Elevation","First Year","Last Year","Number of Years","Station Name")
+metadata_bom_cont <- 
+  read.csv('BoMdata/Station_Metadata_FinalIFD_Bureau_continuous_allcols.csv',
+           col.names = col_names_metadata_bom_cont)
+
+# BoM daily read stations:
+col_names_metadata_bom_daily <- 
+  c("Station Number","Latitude","Longitude","Elevation","First Year","Last Year","Number of Years","Station Name")
+metadata_bom_daily <- 
+  read.csv('BoMdata/Station_Metadata_FinalIFD_Daily Read Stations.csv',
+           col.names = col_names_metadata_bom_daily)
+
+```
+
+Restrict data to VIC domain:
+
+```{r Filter locations within VIC domain}
+# VIC domain bounds:
+lon_limits <- c(140,151.25)
+lat_limits <- c(-39.5,-32.8)
+
+# Limit our metadata to stations within this VIC domain:
+vic_metadata_waterregs <- metadata_waterregs %>% 
+  filter(Latitude >= lat_limits[1], Latitude <= lat_limits[2],
+         Longitude >= lon_limits[1], Longitude <= lon_limits[2])
+vic_metadata_bom_cont <- metadata_bom_cont %>% 
+  filter(Latitude >= lat_limits[1], Latitude <= lat_limits[2],
+         Longitude >= lon_limits[1], Longitude <= lon_limits[2])
+vic_metadata_bom_daily <- metadata_bom_daily %>% 
+  filter(Latitude >= lat_limits[1], Latitude <= lat_limits[2],
+         Longitude >= lon_limits[1], Longitude <= lon_limits[2])
+
+```
+
+Plot up each data type's locations within the domain:
+
+```{r Plot locations of each data type within VIC domain}
+vic_metadata_bom_cont %>%
+  # filter(Number.of.Years >= 25) %>%
+  ggplot(aes(x = Longitude, y = Latitude)) +
+  annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+  geom_point(alpha = 0.6, col = "blue") +
+  coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  ggtitle("VIC-5 domain: BoM continuous read stations", 
+          subtitle = "No filtering of stations")
+
+vic_metadata_bom_daily %>%
+  # filter(Number.of.Years >= 25) %>%
+  ggplot(aes(x = Longitude, y = Latitude)) +
+  annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+  geom_point(alpha = 0.6, col = "red") +
+  coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  ggtitle("VIC-5 domain: BoM daily read stations", 
+          subtitle = "No filtering of stations")
+
+vic_metadata_waterregs %>%
+  # filter(Number.of.Years >= 25) %>%
+  ggplot(aes(x = Longitude, y = Latitude)) +
+  annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+  geom_point(alpha = 0.6, col = "orange") +
+  coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  ggtitle("VIC-5 domain: Water Regulations stations", 
+          subtitle = "No filtering of stations")
+
+
+```
+
+Okay! It seems we have quite a few stations - but we haven't applied any filtering yet for data completeness or length or record.
+
+Look for stations that have at least 16 years of data between 1986 and 2005 (i.e. 80% of years), starting with BoM daily as they have the best coverage:
+
+```{r Filter stations that meet requirements for data length etc.}
+vic_metadata_bom_daily_hist <- vic_metadata_bom_daily %>% 
+  filter(Number.of.Years >= 16, First.Year <= 1990, Last.Year >= 2000)
+  
+# Do we have any stations that start and end within this period?
+num_stations_within_hist_period <- vic_metadata_bom_daily_hist %>% 
+  filter(Last.Year < 2000, First.Year > 1991) %>% 
+  summarise(n())
+num_stations_within_hist_period
+num_stations_start_hist_period <- vic_metadata_bom_daily_hist %>% 
+  filter(First.Year > 1986) %>% 
+  summarise(n())
+num_stations_start_hist_period
+num_stations_end_hist_period <- vic_metadata_bom_daily_hist %>% 
+  filter(Last.Year < 2005) %>% 
+  summarise(n())
+num_stations_end_hist_period
+
+
+```
+
+So there are no stations that both commence and cease within the period, so all of our stations in `vic_metadata_bom_daily_hist` have at least 16 years of data (though we don't know how complete they are until we look at them). No stations started after 1986, but 81 stations out of 1312 ceased during the period.
+
+
+```{r Get station list}
+vic_bom_daily_hist_stations <- vic_metadata_bom_daily_hist %>% 
+  select(Station.Number, Latitude, Longitude, Elevation, Station.Name) %>% 
+  arrange(sort(Station.Name))
+vic_bom_daily_hist_stations %>% 
+  ggplot(aes(x = Longitude, y = Latitude, color = Elevation)) +
+  annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+  geom_point(alpha = 0.6) +
+  coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  ggtitle("VIC-5 domain: BoM daily read stations", 
+          subtitle = "Stations with 16+ years in historical period (1986-2005)")
+
+```
+
+## Analysis of daily rainfall extremes at observational stations
+
+Now to analyse the daily rainfall extremes at each of these daily read stations!
+
+Start off with one station, then figure out how to apply (`lapply`?) to all stations in list:
+
+```{r Read in station data}
+# Can I read in directly from ruby as a mapped drive?
+daily_station_dir <- 'Z:/PhD/data/obs/BoMdata/tmp_Bom_Daily/'
+station <- vic_bom_daily_hist_stations %>% 
+  filter(Station.Name == "MELBOURNE REGIONAL OFFICE")
+station_file <- paste0(daily_station_dir,'dr_',sprintf("%06d",station$Station.Number),'QC4.txt')
+
+station_df <- 
+  read_csv(station_file)
+              # col_names = c("Station", "Year", "Month", "Day", "Precipitation", "Flag", "Raindays in Accumulation",
+              #               "Days of Accumulation", "Precipitation Type"), 
+              # col_types = c("ccddc"))
+
+```
+
+Add the date in propoer format for plotting, and filter for our historical period (1986-2005). Plot the result:
+
+```{r Look at time series of this data as a test}
+# Add datetime column:
+station_df <- station_df %>% 
+  mutate(Date = ymd(paste(sep = '-', YEAR, MO, DA))) 
+# Create time period within which to filter:
+station_hist <- station_df %>% 
+  filter(YEAR >= 1986, YEAR <= 2005)
+station_hist %>% ggplot(aes(Date, PRCP_P)) +
+  geom_point(col = "blue", alpha = 0.2) +
+  geom_smooth(method = "lm", col = "red") +
+  # scale_y_log10() +
+  ggtitle("Rainfall time series at Melbourne Regional Office")
+
+```
+
+Now to look at more extreme rainfall:
+
+```{r Determine various extreme rainfall amounts for this period}
+percentiles <- quantile(station_hist$PRCP_P, probs = c(0.95, 0.99))
+percentiles
+max_precip <- max(station_hist$PRCP_P)
+max_precip
+```
+
+So, our 95th percentile (from all days, not just rain days) is only 9 mm.
+
+The 99th percentile is 24.192 mm.
+
+Interestingly, we can't actually see the maximum value on our time series... Perhaps it is only showing large multi-day events?
+
+Okay, now look at the monthly maxima:
+```{r Look at monthly maxima}
+monmax <- station_hist %>%
+  group_by(YEAR, MO) %>%
+  summarise(monmax = max(PRCP_P, na.rm = TRUE))
+head(monmax)
+
+monmax <- monmax %>% 
+  mutate(Date = ymd(paste(YEAR,MO,'01',sep=' '))) %>% ungroup(year) %>% 
+  select(Date, monmax)
+monmax %>% ggplot(aes(x = Date, y = monmax)) +
+  geom_col(fill = "blue", alpha = 0.4) +
+  geom_smooth(method = "lm", colour = "red") +
+  ggtitle("Monthly maximum precipitation for Melbourne Regional Office")
+
+```
+
+Now look at annual maxima:
+
+```{r Look at annual maxima}
+annmax <- station_hist %>%
+  group_by(YEAR) %>%
+  summarise(annmax = max(PRCP_P, na.rm = TRUE))
+head(annmax)
+
+annmax <- annmax %>% mutate(Date = ymd(paste(YEAR,'01','01',sep=' '))) %>% ungroup(year) %>% 
+  select(Date, annmax)
+
+annmax
+
+annmax %>% ggplot(aes(x = Date, y = annmax)) +
+  geom_point(col = "blue", alpha = 0.8) +
+  geom_smooth(method = "lm", colour = "red") +
+  expand_limits(y = 0) +
+  ggtitle("Annual maximum precipitation for Melbourne Regional Office")
+
+```
+
+Linear trends over these maxima series are probably not significant; especially for annmax which is only 20 values. (The monmax series might be closer with 240 values.) Interesting to note that the monthly series has a decreasing trend, even though by far the largest value is recorded in the last year of the record, while the annmax series is increasing (once again, probably due to the outlier late in the series). This could be taken as a sign that we are seeing fewer "moderately heavy" storms, but when they do come, they rain more... but this is nowhere near enough data to prove that!
+
+### GEV on annual maxima
+
+Calculate the parameters of a GEV distribution based on our annmax data, and derive return levels based on these parameters for each package.
+
+
+```{r Calculate ARI-20}
+library(lmom)
+Lmoments <- samlmu(annmax$annmax)
+gev_params <- pelgev(Lmoments)
+gev_params
+# evplot(y = annmax$annmax)
+# evdistq(quagev, gev_params)
+# Back out the ARI values for 2, 5, 10, 20, 50, 100 years:
+RL <- quagev(c(0.5, 0.8, 0.9, 0.95, 0.98, 0.99), gev_params)
+RL
+```
+
+```{r GEV - evd}
+library(evd)
+evd_mle_params <- fgev(annmax$annmax)
+evd_mle_params
+
+# plot(evd_mle_params, which = 4)
+
+# Back out the ARI values for 2, 5, 10, 20, 50, 100 years:
+evd_mle_params_mod <- evd_mle_params$estimate
+evd_mle_params_mod[3] <- evd_mle_params_mod[3] * -1
+quagev(c(0.5, 0.8, 0.9, 0.95, 0.98, 0.99), gev_params)
+RL_evd <- quagev(c(0.5, 0.8, 0.9, 0.95, 0.98, 0.99), evd_mle_params_mod)
+RL_evd
+```
+
+And now using the `ismev` package:
+```{r}
+library(ismev)
+ismev_lme_params <- gev.fit(annmax$annmax)
+gev.diag(ismev_lme_params)
+
+# Back out the ARI values for 2, 5, 10, 20, 50, 100 years:
+ismev_lme_params_mod <- ismev_lme_params$mle
+ismev_lme_params_mod[3] <- ismev_lme_params_mod[3] * -1
+quagev(c(0.5, 0.8, 0.9, 0.95, 0.98, 0.99), gev_params)
+RL_ismev <- quagev(c(0.5, 0.8, 0.9, 0.95, 0.98, 0.99), ismev_lme_params_mod)
+RL_ismev
+```
+
+### Summary
+
+By our three methods of estimating GEV parameters, the respective return levels are:
+```{r Summary of return levels}
+RL_mat <- matrix(nrow = 3, ncol = 6)
+colnames(RL_mat) <- c("2", "5", "10", "20", "50", "100")
+rownames(RL_mat) <- c('lmom', 'evd', 'ismev')
+RL_mat[1,] <- RL
+RL_mat[2,] <- RL_evd
+RL_mat[3,] <- RL_ismev
+RL_mat
+```
+
+
+
+
+
+- TODO: We do need to test each year (and month?) for data completeness...
+
+## AN ASIDE:
+
+### What do other 20-year periods look like?
+
+Try getting stats from various 20-year blocks at Melbourne:
+- 1961-1980
+- 1971-1990
+- 1981-2000
+- 1991-2010
+
+```{r Testing other 20-year periods}
+
+```
+
+
+
+
