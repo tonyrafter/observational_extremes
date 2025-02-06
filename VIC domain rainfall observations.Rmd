@@ -1,6 +1,10 @@
 ---
 title: "Analysis of VIC domain extreme rainfall observations"
-output: html_notebook
+output:
+  html_notebook:
+    theme: simplex
+  html_document:
+    df_print: paged
 ---
 
 ## Motivation
@@ -21,9 +25,10 @@ library(tidyverse)
 library(lubridate)
 library(ggmap)
 library(maps)
-library(tmaptools)
+# library(tmaptools)
 library(mapdata)
-library(ggmapstyles)
+# library(ggmapstyles)
+library(knitr)
 
 # Google maps API key: AIzaSyDJeNzaBarybVQ7G4-eZmgD02xAtyOiuBc
 api_key <- 'AIzaSyDJeNzaBarybVQ7G4-eZmgD02xAtyOiuBc'
@@ -157,6 +162,699 @@ vic_bom_daily_hist_stations %>%
 
 ```
 
+
+
+
+## Determining grid locations for which there are multiple obs stations
+
+Want to find out if there are any 0.05&deg; grid cells that contain multiple observational stations.
+
+Search for:
+
+- same type (e.g. daily BoM stations only) 
+- combinations of station types
+
+### BoM Daily stations
+
+```{r daily stations in grid cells}
+convert_obs_locations_to_model_grid <- function(obs, res = 0.05) {
+  obs <- obs %>% 
+    mutate(Latitude = round(round(Latitude * 100) / 5) * 5 / 100) %>% 
+    mutate(Longitude = round(round(Longitude * 100) / 5) * 5 / 100)
+  return(obs)
+}
+
+obs_on_model_grid_df <- convert_obs_locations_to_model_grid(vic_bom_daily_hist_stations) %>% 
+  arrange(Latitude, Longitude)
+
+head(obs_on_model_grid_df)
+
+```
+
+
+
+#### Now determine if there are multiple stations in the same location:
+
+```{r plot daily stations in grid cells}
+# locations in same cell must have same latitude and same longitude.
+
+dup_daily <- obs_on_model_grid_df %>% 
+  group_by(Latitude, Longitude) %>% 
+  filter(n()>1)
+
+# Plot locations on map:
+plot_dup_daily <- dup_daily %>% 
+  ggplot(aes(x = Longitude, y = Latitude, color = Elevation)) +
+  annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+  geom_point(alpha = 0.3) +
+  coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  ggtitle("VIC-5 domain: Locations with duplicate BoM daily read stations", 
+          subtitle = "Stations with 16+ years in historical period (1986-2005)")
+
+plot_dup_daily
+
+```
+
+
+Now do the same for the other two station types:
+
+### BoM continuous stations
+
+```{r continuous stations in grid cells}
+# Filter for 16+ years:
+# vic_metadata_bom_cont_hist <- vic_metadata_bom_cont %>% 
+#   filter(Number.of.Years >= 16, First.Year <= 1990, Last.Year >= 2000)
+
+# cont_on_model_grid_df <- convert_obs_locations_to_model_grid(vic_metadata_bom_cont_hist) %>% 
+cont_on_model_grid_df <- convert_obs_locations_to_model_grid(vic_metadata_bom_cont) %>% 
+  arrange(Latitude, Longitude)
+
+head(cont_on_model_grid_df)
+
+```
+
+
+
+#### Now determine if there are multiple stations in the same location:
+
+```{r plot continuous stations in grid cells}
+# locations in same cell must have same latitude and same longitude.
+dup_cont <- cont_on_model_grid_df %>% 
+  group_by(Latitude, Longitude) %>% 
+  filter(n()>1)
+
+# Plot locations on map:
+dup_cont %>% 
+  ggplot(aes(x = Longitude, y = Latitude, color = Elevation)) +
+  annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+  geom_point(alpha = 0.3) +
+  coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  ggtitle("VIC-5 domain: Locations with duplicate BoM continuous stations", 
+          subtitle = "No limitation on years in historical period (1986-2005)")
+```
+
+
+
+### Water regs stations
+
+```{r water regs stations in grid cells}
+vic_metadata_waterregs_hist <- vic_metadata_waterregs %>%
+  filter(Number.of.Years >= 16, First.Year <= 1990, Last.Year >= 2000)
+
+# waterregs_on_model_grid_df <- convert_obs_locations_to_model_grid(vic_metadata_waterregs) %>% 
+waterregs_on_model_grid_df <- convert_obs_locations_to_model_grid(vic_metadata_waterregs_hist) %>% 
+  arrange(Latitude, Longitude)
+
+head(waterregs_on_model_grid_df)
+
+```
+
+
+
+#### Now determine if there are multiple stations in the same location:
+
+```{r plot water regs stations in grid cells}
+# locations in same cell must have same latitude and same longitude.
+dup_waterregs <- waterregs_on_model_grid_df %>% 
+  group_by(Latitude, Longitude) %>% 
+  filter(n()>1)
+
+# Plot locations on map:
+dup_waterregs %>% 
+  ggplot(aes(x = Longitude, y = Latitude, color = Elevation)) +
+  annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+  geom_point(alpha = 0.3) +
+  coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  ggtitle("VIC-5 domain: Locations with duplicate Water Regulations stations", 
+          subtitle = "Stations with 16+ years in historical period (1986-2005)")
+```
+
+
+### Combinations of station types
+
+```{r combination of stations in grid cells}
+daily_meta <- vic_metadata_bom_daily %>% mutate(Source = "BoM_daily")
+cont_meta <- vic_metadata_bom_cont %>% mutate(Source = "BoM_cont")
+waterregs_meta <- vic_metadata_waterregs %>% mutate(Source = "Water_Regs")
+
+all_metadata1 <- full_join(daily_meta, cont_meta, 
+                           by = c("Source", "Station.Number", "Latitude", "Longitude", "Elevation",
+                                  "First.Year", "Last.Year", "Number.of.Years", "Station.Name"))
+# all_metadata <- full_join(all_metadata1, vic_metadata_waterregs, 
+#                            by = c("Station.Number", "Latitude", "Longitude", "Elevation",
+#                                   "First.Year", "Last.Year", "Number.of.Years", "Station.Name"))
+# doesn't work as there are underscores in 'station number' for water regs
+# Convert 'station number' to character:
+all_metadata1 <- all_metadata1 %>% mutate(Station.Number = as.character(Station.Number))
+all_metadata2 <- waterregs_meta %>% mutate(Station.Number = as.character(Station.Number))
+
+all_metadata <- full_join(all_metadata1, all_metadata2,
+                           by = c("Source", "Station.Number", "Latitude", "Longitude", "Elevation",
+                                  "First.Year", "Last.Year", "Number.of.Years", "Station.Name"))
+
+
+all_obs_on_model_grid_df <- convert_obs_locations_to_model_grid(all_metadata) %>% 
+  arrange(Latitude, Longitude)
+
+# Because we are combining data from different sources, there may be duplicated stations 
+# (especially for Bom daily and continuous) - 
+# SO - get rid of duplicate station numbers:
+all_distinct_obs_on_model_grid_df <- all_obs_on_model_grid_df %>% 
+  distinct(Station.Number, .keep_all = TRUE)
+
+
+# head(all_obs_on_model_grid_df)
+
+# Apply limitation of 16+ years in record between 1986-2005:
+all_filtered_obs_on_model_grid_df <- all_obs_on_model_grid_df %>%
+  filter(Number.of.Years >= 16, First.Year <= 1990, Last.Year >= 2000)
+all_distinct_filtered_obs_on_model_grid_df <- all_distinct_obs_on_model_grid_df %>%
+  filter(Number.of.Years >= 16, First.Year <= 1990, Last.Year >= 2000)
+
+# head(all_filtered_obs_on_model_grid_df)
+
+
+```
+
+
+
+#### Now determine if there are multiple stations in the same location:
+
+```{r plot combination of stations in grid cells}
+### ALL OBS STATIONS:
+
+# locations in same cell must have same latitude and same longitude.
+dup_all <- all_obs_on_model_grid_df %>% 
+  group_by(Latitude, Longitude) %>% 
+  filter(n()>1)
+dup_all_filtered <- all_filtered_obs_on_model_grid_df %>% 
+  group_by(Latitude, Longitude) %>% 
+  filter(n()>1)
+
+
+# Plot locations on map:
+dup_all %>% 
+  ggplot(aes(x = Longitude, y = Latitude, color = Source)) +
+  annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+  geom_point(alpha = 0.3) +
+  coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  ggtitle("VIC-5 domain: Locations with duplicate stations from various sources", 
+          subtitle = "No limitation on years in historical period (1986-2005)")
+
+dup_all_filtered %>% 
+  ggplot(aes(x = Longitude, y = Latitude, color = Source)) +
+  annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+  geom_point(alpha = 0.3) +
+  coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  ggtitle("VIC-5 domain: Locations with duplicate stations from various sources", 
+          subtitle = "Stations with 16+ years in historical period (1986-2005)")
+
+
+### DISTINCT (NON-DUPLICATED) STATIONS:
+dup_all_distinct <- all_distinct_obs_on_model_grid_df %>% 
+  group_by(Latitude, Longitude) %>% 
+  filter(n()>1)
+dup_all_filtered_distinct <- all_distinct_filtered_obs_on_model_grid_df %>% 
+  group_by(Latitude, Longitude) %>% 
+  filter(n()>1)
+
+# Plot locations on map:
+dup_all_distinct %>% 
+  ggplot(aes(x = Longitude, y = Latitude, color = Source)) +
+  annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+  geom_point(alpha = 0.3) +
+  coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  ggtitle("VIC-5 domain: Locations with distinct duplicate stations from various sources", 
+          subtitle = "No limitation on years in historical period (1986-2005)")
+
+dup_all_filtered_distinct %>% 
+  ggplot(aes(x = Longitude, y = Latitude, color = Source)) +
+  annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+  geom_point(alpha = 0.3) +
+  coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+  ggtitle("VIC-5 domain: Locations with distinct duplicate stations from various sources", 
+          subtitle = "Stations with 16+ years in historical period (1986-2005)")
+
+
+```
+
+
+
+## Look at ARI-20 at duplicated stations:
+
+We only have GEV outputs for daily read stations at present - so we will start with just the daily station locations with duplicates within a given 0.05&deg; grid cell.
+
+Firstly, a reminder of where these stations are:
+
+```{r replot daily duplicate stations}
+plot_dup_daily
+```
+
+
+Now, create a dataframe with various return levels for only our 'duplicated' stations:
+
+```{r get obs extremes}
+vic_daily_extremes_all <- read_csv("rainfall_extremes_BoM-daily_VIC-5_1986-2005_no-QC.csv")
+# Convert station number to character to match other data
+vic_daily_extremes_all <- vic_daily_extremes_all %>% mutate(Station.Number = as.character(Station.Number))
+# Put new station data on same lat-lon grid as model
+vic_daily_extremes_all_on_model_grid_df <- convert_obs_locations_to_model_grid(vic_daily_extremes_all) %>% 
+  arrange(Latitude, Longitude)
+# This produces only BoM daily stations as we only produced GEV outputs of these in vic_daily_extremes_all!!!
+
+
+vic_daily_extremes_all_dup_filtered_distinct <- 
+  inner_join(vic_daily_extremes_all_on_model_grid_df, dup_all_filtered_distinct,
+             by = c("Station.Number", "Latitude", "Longitude", "Elevation", "Station.Name")) %>% 
+  select(-First.Year, -Last.Year, -Number.of.Years, -Source, -Agency, -First.Date, -Last.Date) %>% 
+  group_by(Latitude, Longitude) %>% 
+  filter(n()>1)
+
+```
+
+Now we have the return values for duplicated stations, add the return levels from the ERA Interim-forced CCAM run to enable us to compare them directly:
+
+Read in GEV outputs of CCAM simulation and combine with observations at sites with multiple gauges:
+
+```{r create combined obs and model df}
+library(ncdf4)
+library(reshape2)
+
+model <- 'ECMWF-ERAINT'
+ARI <- 20
+period <- '1986-2005'
+res <- 0.05
+
+## ---- get_regionalised_filepath
+getPath <- function(model = 'ECMWF-ERAINT', period = '1986-2005', ARI = 20, res = 0.05) {
+  if (model == 'ECMWF-ERAINT') {
+    file_model <- 'CCAM-ERA-nudged'
+  } else {
+    file_model <- paste0('CCAM-',model)
+    # if (period == '1986-2005') {
+    #   experiment <- 'historical'
+    # } else {
+    #   experiment <- rcp
+    # }
+  }
+  path <- paste0('C:/Users/raf018/OneDrive - CSIRO/Working/Projects/CPVIC-19/GEV/regionalised_',res,'-degree-box_ARI-',ARI,'_rx1day_',file_model,'_',period,'.nc')
+  return(path)
+}
+
+
+## ---- get_regionalised_ncdata
+get_regionalised_data <- function(infile, ARI = 20) {
+  require(reshape2)
+  ncfile <- nc_open(filename = infile)
+  # Get lons and lats
+  lons <- ncvar_get(nc = ncfile, varid = 'longitude')
+  lon_limits <- range(lons)
+  lats <- ncvar_get(nc = ncfile, varid = 'latitude')
+  lat_limits <- range(lats)
+  input_var <- paste0('ARI-',ARI)
+  
+  # Get actual data from netcdf file
+  df_ARI <- ncvar_get(ncfile, input_var)
+  # convert to mm/d
+  # df_ARI <- df_ARI * 86400
+  dimnames(df_ARI) <- list(lat=lats, lon=lons)
+  model_ARI <- melt(df_ARI, value.name = "ARI")
+  
+  # out_list <- list(model_ARI, lons, lats)
+  return(model_ARI)
+}
+
+
+# create tables of regionalised ARIs for ARI-5, -10 and -20 and 0.05, 0.15 and 0.25 degree boxes
+
+# Create list to hold data:
+ARI_list <- list()
+
+for (r in seq(1,5,2)) {
+  res <- 0.05 * r
+  
+  for (RP in c(5,10,20)) {
+    
+    # Load a netcdf file with interpolated ARIs
+    modelfile <- getPath(model, period, RP, res)
+    
+    # Load in data
+    ARI_var <- paste0('res_',res,'_ARI-',RP)
+    ARI_list[[ARI_var]] <- get_regionalised_data(modelfile, RP)
+    
+    if (r == 1 & RP == 5) {
+      ARIdf <- ARI_list[[ARI_var]] %>% rename(!!ARI_var := ARI)
+      # dplot <- 
+      #   ARI_density_count(ARI_list[[ARI_var]]) + ggtitle('Original resolution (0.05 degrees)') +
+      #   geom_vline(xintercept = median(ARI_list[[ARI_var]][['ARI']], na.rm = TRUE), linetype = 'dashed')
+    } else {
+      # Join our various ARI dfs into one df with multiple columns
+      ARIdf2 <- ARI_list[[ARI_var]] %>% rename(!!ARI_var := ARI)
+      ARIdf <- full_join(ARIdf, ARIdf2, by = c('lon','lat'))
+      rm(ARIdf2)
+      
+      # dplot <- 
+      #   ARI_density_count(ARI_list[[ARI_var]]) + ggtitle(paste0('Regionalised at ',res,' degrees')) +
+      #   geom_vline(xintercept = median(ARI_list[[ARI_var]][['ARI']], na.rm = TRUE), linetype = 'dashed')
+    }
+    # ggsave(plot = dplot, 
+    #        filename = paste0('ARI-',ARI,'_regionalised_',res,'_',model,'_',period,'_density.png'),
+    #        device = 'png')
+  }
+  
+}
+
+rm(ARI_list)
+
+# Rename lat and lon to match obs data:
+ARIdf <- ARIdf %>% mutate(Latitude = lat, Longitude = lon)
+
+# Now join the various ARI df's together
+
+joined_model_and_obs <- inner_join(vic_daily_extremes_all_dup_filtered_distinct,
+                                   ARIdf,
+                                   by = c("Latitude", "Longitude")) %>% 
+  select(-lat, -lon)
+### This is giving 60 locations, whereas we were expecting 82?????
+### OK I FIGURED IT OUT
+### the lon_limits and lat_limits were wrong for the obs data
+
+```
+
+```{r plot comparison of gauge vs model rainfall totals}
+# Now, plot the grouped stations together with the modelled value:
+compare_ARI20_plot <- joined_model_and_obs %>% 
+  select(Latitude, Longitude, Station.Name, `ARI-20`, `res_0.05_ARI-20`) %>% 
+  mutate(Location = as.character(paste0(sprintf("%.2f",round(Longitude,2)),', ',
+                                        sprintf("%.2f",round(Latitude,2)))),
+         Observed = `ARI-20`, Modelled = `res_0.05_ARI-20`) %>% 
+  group_by(Location) %>% 
+  arrange(Observed) %>% 
+  ggplot(aes(x = Location, y = Observed)) +
+  geom_point(alpha = 0.4, colour = 'blue') +
+  geom_point(aes(x = Location, y = Modelled), 
+             colour = 'red', alpha = 0.5) +
+  ylab('daily rainfall (mm)') +
+  theme(axis.text.x = element_text(angle = 90)) +
+  ggtitle("Comparison of extreme daily rainfall at locations with multiple daily gauges",
+          subtitle = "ARI-20")
+  
+
+compare_ARI5_plot <- joined_model_and_obs %>% 
+  select(Latitude, Longitude, Station.Name, `ARI-5`, `res_0.05_ARI-5`) %>% 
+  mutate(Location = as.character(paste0(sprintf("%.2f",round(Longitude,2)),', ',
+                                        sprintf("%.2f",round(Latitude,2)))),
+         Observed = `ARI-5`, Modelled = `res_0.05_ARI-5`) %>% 
+  group_by(Location) %>% 
+  arrange(Observed) %>% 
+  ggplot(aes(x = Location, y = Observed)) +
+  geom_point(alpha = 0.4, colour = 'blue') +
+  geom_point(aes(x = Location, y = Modelled), 
+             colour = 'red', alpha = 0.5) +
+  ylab('daily rainfall (mm)') +
+  theme(axis.text.x = element_text(angle = 90)) +
+  ggtitle("Comparison of extreme daily rainfall at locations with multiple daily gauges",
+          subtitle = "ARI-5")
+  
+compare_ARI5_plot
+compare_ARI20_plot
+
+# # Now, create a 'tidy' df from our multi-column df:
+# varname <- paste0('ARI-',ARI)
+# ARI_tidy <- ARIdf %>% 
+#   gather(starts_with('res_'), key = 'resolution', value = !!varname) %>% 
+#   separate(resolution, into = c('guff','resolution'), sep = '_') %>% 
+#   select(-guff)
+
+
+```
+
+
+So that worked okay, but I couldn't put a legend on due to a lack of group/factor, and doing anything else like percentage difference will be ugly... So, try to do the same thing (and more) with a tidy DF:
+
+```{r model vs obs comparison using tidy approach}
+tidy_joined_model_and_obs <- joined_model_and_obs %>% 
+  gather(key = "ARI", value = "rainfall", c(9:11,14:16)) %>% 
+  select(Latitude, Longitude, Elevation, Station.Name, ARI, rainfall)
+
+tidy_joined_model_and_obs <- tidy_joined_model_and_obs %>% 
+  mutate(Source = (if_else(substr(ARI,1,3)=="ARI",
+                           "gauge",
+                           "model")),
+         ARI = as.numeric(if_else(Source=="gauge",
+                        substr(ARI,5,6),
+                        substr(ARI,14,15)))) %>% 
+  arrange(Longitude, Latitude, Station.Name, ARI) %>% 
+  mutate(Location = as.character(paste0(sprintf("%.2f",round(Longitude,2)),', ',
+                                        sprintf("%.2f",round(Latitude,2)))))
+
+joined_model_and_obs %>% 
+  gather(key = "ARI", value = "rainfall", c(9:11,14:22)) %>% 
+  select(Latitude, Longitude, Elevation, Station.Name, ARI, rainfall) %>% 
+  mutate(Source = (if_else(substr(ARI,1,3)=="ARI",
+                           "gauge",
+                           "model")),
+         ARI = as.numeric(if_else(Source=="gauge",
+                        substr(ARI,5,6),
+                        substr(ARI,14,15)))) %>% 
+  arrange(Longitude, Latitude, Station.Name, ARI) %>% 
+  mutate(Location = as.character(paste0(sprintf("%.2f",round(Longitude,2)),', ',
+                                        sprintf("%.2f",round(Latitude,2)))))
+
+
+
+plot_obs_model_comparison <- function(df = tidy_joined_model_and_obs) {
+  df %>% 
+    # filter(ARI == !!ARI) %>% 
+    group_by(Source, Location, ARI) %>% 
+    ggplot(aes(x = Location, y = rainfall, colour = Source)) +
+    geom_point(alpha = 0.4) +
+    scale_color_manual(values=c("blue", "red")) +
+    ylab('daily rainfall (mm)') +
+    expand_limits(y = 0) +
+    theme(axis.text.x = element_text(angle = 90)) +
+    ggtitle("Comparison of extreme daily rainfall at locations with multiple daily gauges",
+            subtitle = "Faceted to display each ARI-5, 10 and 20") +
+    facet_grid(ARI ~ .)
+}
+```
+
+```{r plot of model vs station values at sites with multiple gauges, fig.width=9, fig.height=7}
+# Plot comparison:
+plot_obs_model_comparison(tidy_joined_model_and_obs)
+
+```
+
+
+Now work on determining the percentage difference between the modelled and observed values - perhaps using the mean of the gauge values:
+
+```{r compare mean of obs with model}
+calculate_biases <- function(df = tidy_joined_model_and_obs) {
+  temp_df <- 
+    # df %>%
+  tidy_joined_model_and_obs %>%
+    # filter(ARI == !!ARI) %>% 
+    # group_by(Location, Source) %>% 
+    group_by(Location, Source, ARI) %>% 
+    summarise(rainfall = mean(rainfall)) %>% 
+    spread(Source, rainfall) %>% 
+    mutate(absolute = model - gauge,
+           percentage = (absolute*100 / gauge)) %>% 
+    rename(gauge_mean = gauge) 
+  
+  table_kable <- temp_df %>% 
+    group_by(ARI) %>% 
+    summarise(mean_percentage = mean(percentage),
+              mean_absolute = mean(absolute)) %>% 
+    # summarise(mean_percentage = mean(mean_percentage),
+    #           mean_absolute = mean(mean_absolute)) %>% 
+    kable(format = "html", digits = 2, align = 'c',
+          caption = "Mean difference between model value and co-located daily rainfall stations for each ARI")
+  
+  print(table_kable)
+  return(temp_df)
+}
+
+tidy_joined_model_and_obs_biases <- calculate_biases(df = tidy_joined_model_and_obs)
+# tidy_joined_model_and_obs_biases_5 <- calculate_biases(df = tidy_joined_model_and_obs, ARI = 5)
+
+
+plot_obs_model_differences <- function(df, ARI = NULL){
+  if (! is.null(ARI)) {
+    df <- df %>% filter(ARI == !!ARI)
+    subtitle_text <- paste0("Difference between model and mean of co-located gauges for ARI-",ARI)
+  } else {
+    subtitle_text <- "Difference between model and mean of co-located gauges"
+  }
+  df %>% 
+    group_by(ARI) %>% 
+    gather(key = "diff_type", value = "value", absolute, percentage) %>% 
+    ggplot(aes(x = Location, y = value, fill = diff_type, group = diff_type)) +
+    geom_col(alpha = 0.5, position = "dodge") +
+    stat_summary(fun.y = mean, 
+                 aes(x = 1, yintercept = ..y.., group = diff_type, colour = diff_type, linetype = diff_type),
+                 geom = "hline", size = 0.35) +
+    theme(axis.text.x = element_text(angle = 90)) +
+    labs(fill = "", colour = "", linetype = "") + 
+    scale_fill_manual(values=c("blue", "red"), labels = c("mm","%")) +
+    scale_color_manual(values=c("blue", "red"), labels = c("mm","%")) +
+    scale_linetype_manual(values=c("dotted", "dotdash"), labels = c("mm","%")) +
+    ggtitle("Comparison of extreme daily rainfall at locations with multiple daily gauges",
+            subtitle = subtitle_text) +
+    facet_grid(ARI~.)
+}
+# plot_obs_model_differences(df = tidy_joined_model_and_obs_biases, ARI = 5)
+```
+
+```{r bias at colocated stations, fig.width=9, fig.height=9}
+
+plot_obs_model_differences(df = tidy_joined_model_and_obs_biases)
+# , ARI = 20)
+# plot_obs_model_differences(df = tidy_joined_model_and_obs_biases, ARI = 5)
+
+```
+
+
+
+
+
+
+Now show these differences on a map:
+
+```{r show differences on map, fig.width=10, fig.height=4}
+plot_obs_model_differences_on_map <- function(df = tidy_joined_model_and_obs, 
+                                              ARI = 20, 
+                                              type = c("percentage", "absolute")){
+  df %>%
+  # tidy_joined_model_and_obs %>%
+    # filter(ARI == !!ARI) %>% 
+    group_by(Location, Latitude, Longitude, Source, ARI) %>% 
+    summarise(rainfall = mean(rainfall)) %>% 
+    spread(Source, rainfall) %>% 
+    mutate(absolute = model - gauge,
+           percentage = (absolute*100 / gauge)) %>% 
+    rename(gauge_mean = gauge) %>% 
+    gather(key = "diff_type", value = "value", absolute, percentage) %>% 
+    filter(diff_type == type) %>% 
+    ggplot(aes(x = Longitude, y = Latitude, size = abs(value))) +
+    annotation_map(map_data("worldHires"), fill = "NA", col = "grey25") +
+    geom_point(aes(colour = cut(value, c(-Inf,0,Inf))),
+               na.rm = TRUE, alpha = 0.3) +
+    scale_color_manual(name = "Direction of\nmodel bias",
+                       labels = c("negative", "positive"),
+                       values = c("(0, Inf]" = "red",
+                                  "(-Inf,0]" = "blue"),
+                       drop = FALSE) +
+    scale_size(name = "Magnitude of\nmodel bias",
+               breaks = c(25,50,75,100),
+               limits = c(0,199), 
+               range = c(1,5)) +
+    
+    coord_quickmap(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+    # coord_cartesian(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+    ggtitle("Comparison of extreme daily rainfall at locations with multiple daily gauges",
+            subtitle = paste0("Sign and magnitude of difference (",type,") between model and mean of co-located gauges for ARIs 5, 10, 20"))+
+    facet_wrap(ARI~., nrow=1)
+      # "VIC-5 domain: Locations with distinct duplicate stations from various sources", 
+      #       subtitle = "Stations with 16+ years in historical period (1986-2005)")
+
+    
+    # ggplot(aes(x = Longitude, y = Latitude, fill = diff_type)) +
+    # geom_col(alpha = 0.5, position = "dodge") +
+    # theme(axis.text.x = element_text(angle = 90)) +
+    # labs(fill = "") + 
+    # scale_fill_manual(values=c("blue", "red"), labels = c("mm","%")) +
+    # ggtitle("Comparison of extreme daily rainfall at locations with multiple daily gauges",
+    #         subtitle = paste0("Difference between model and mean of co-located gauges for ARI-",ARI))
+}
+
+ARI <- 20
+type <- "percentage"
+plot_obs_model_differences_on_map(df = tidy_joined_model_and_obs, ARI = ARI, type = type)
+type <- "absolute"
+plot_obs_model_differences_on_map(df = tidy_joined_model_and_obs, ARI = ARI, type = type)
+# ARI <- 5
+# type <- "percentage"
+# plot_obs_model_differences_on_map(df = tidy_joined_model_and_obs, ARI = ARI, type = type)
+# type <- "absolute"
+# plot_obs_model_differences_on_map(df = tidy_joined_model_and_obs, ARI = ARI, type = type)
+
+```
+
+
+
+Now try to look at whether the 'co-located' stations with high variability in observed rainfall quantiles are located in regions of varying terrain:
+
+```{r colocated stations with elevation}
+joined_model_and_obs_elevation_ranges <-
+  joined_model_and_obs %>% 
+  group_by(Longitude, Latitude) %>% 
+  summarise(elevation_range = range(Elevation)[2] - range(Elevation)[1]) %>% 
+  inner_join(joined_model_and_obs) %>% 
+  arrange(Longitude, Latitude, Station.Name) %>% 
+  mutate(Location = as.character(paste0(sprintf("%.2f",round(Longitude,2)),', ',
+                                        sprintf("%.2f",round(Latitude,2))))) 
+joined_model_and_obs_elevation_ranges %>% 
+  ggplot(aes(x = Location, y = elevation_range)) +
+  geom_point(alpha = 0.4) +
+  ylab('elevation change (m)') +
+  expand_limits(y = 0) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  ggtitle("Comparison of elevation between locations with multiple daily gauges")
+
+
+
+```
+
+
+
+Now try to overplot this information on the earlier comparison between station gauge and modelled values:
+
+```{r add elevation to model_obs comparison, fig.width=9, fig.height=9}
+
+# Plot ARI-20 comparison:
+ARI <- 20
+plot_obs_model_comparison(tidy_joined_model_and_obs) +
+  geom_point(data = joined_model_and_obs_elevation_ranges,
+             aes(x = Location, y = elevation_range*2.5),
+             colour = "black", shape = 0) + 
+  scale_y_continuous(sec.axis = sec_axis(~./2.5, name = "Elevation Difference (m)"))
+```
+
+No obvious relationship there... 
+
+But to test this, now do a more direct comparison between elevation change and bias (the difference between model and the average of co-located observations):
+
+```{r relate elevation change to model biases}
+ARI <- 20
+tidy_joined_model_and_obs_biases %>% 
+  inner_join(joined_model_and_obs_elevation_ranges, by = 'Location') %>% 
+  # filter(ARI == !!ARI) %>% 
+  ggplot(aes(y = percentage, x = elevation_range)) +
+  geom_point() +
+  ggtitle("Relationship between model bias and intra-grid point elevation change\nat co-located daily gauge stations",
+          subtitle = paste0("ARI-",ARI)) +
+  xlab("Intra-grid Station Elevation Change (m)") +
+  ylab("Model 'Bias' (%)") +
+  facet_grid(~ARI) +
+  geom_smooth(method = "lm")
+```
+
+No clear relationship there, as signified by the slope of the regression being close to zero for all but ARI-5 (i.e. slope could be positive or negative, so not significantly different from zero). This is as expected from "eyeballing" the above plots of ARI with elevation change overplotted.
+
+
+
+
+
+--------------
+
 ## Analysis of daily rainfall extremes at observational stations
 
 Now to analyse the daily rainfall extremes at each of these daily read stations!
@@ -165,7 +863,7 @@ Start off with one station, then figure out how to apply (`lapply`?) to all stat
 
 ```{r Read in station data}
 # Can I read in directly from ruby as a mapped drive?
-daily_station_dir <- 'Z:/PhD/data/obs/BoMdata/tmp_Bom_Daily/'
+daily_station_dir <- 'S:/PhD/data/obs/BoMdata/tmp_Bom_Daily/'
 station <- vic_bom_daily_hist_stations %>% 
   filter(Station.Name == "MELBOURNE REGIONAL OFFICE")
 station_file <- paste0(daily_station_dir,'dr_',sprintf("%06d",station$Station.Number),'QC4.txt')
@@ -218,7 +916,7 @@ monmax <- station_hist %>%
 head(monmax)
 
 monmax <- monmax %>% 
-  mutate(Date = ymd(paste(YEAR,MO,'01',sep=' '))) %>% ungroup(year) %>% 
+  mutate(Date = ymd(paste(YEAR,MO,'01',sep=' '))) %>% ungroup(YEAR) %>% 
   select(Date, monmax)
 monmax %>% ggplot(aes(x = Date, y = monmax)) +
   geom_col(fill = "blue", alpha = 0.4) +
@@ -235,7 +933,7 @@ annmax <- station_hist %>%
   summarise(annmax = max(PRCP_P, na.rm = TRUE))
 head(annmax)
 
-annmax <- annmax %>% mutate(Date = ymd(paste(YEAR,'01','01',sep=' '))) %>% ungroup(year) %>% 
+annmax <- annmax %>% mutate(Date = ymd(paste(YEAR,'01','01',sep='-'))) %>% 
   select(Date, annmax)
 
 annmax

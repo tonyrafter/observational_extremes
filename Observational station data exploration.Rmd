@@ -1,6 +1,8 @@
 ---
 title: "Observational data - station exploration"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
 ---
 
 ```{r instructions for R Notebook, include=FALSE}

@@ -23,7 +23,7 @@ year_end <- 2005
 domain <- "VIC-5"
 # provider <- "BoM-daily"
 # provider <- "BoM-continuous"
-provider <- "BoM-continuous"
+provider <- "Water-Regulations"
 
 # Quality control settings:
 # Minimum fraction of years in the period with available data:
@@ -228,7 +228,7 @@ if (provider == 'Water-Regulations') {
 # Look up which machine we are running on:
 info <- Sys.info()
 machine <- info[['nodename']]
-if (machine == 'ALEMBIC-AS') {
+if (machine == 'HELIOTROPE-AS') {
   station_datadir <- paste0('Z:/PhD/data/obs/BoMdata/',datadir,'/')
 }
 if (machine == 'ruby') {

@@ -1,0 +1,1732 @@
+#' ---
+#' title: "GSDR analysis"
+#' output: 
+#'   html_document:
+#'     df_print: paged
+#'     toc: yes
+#'     toc_float:
+#'       collapsed: true
+#'   html_notebook:
+#'       theme: yeti
+#'   prettydoc::html_pretty:
+#'     theme: leonids
+#' ---
+#' 
+## ----load libraries, message=FALSE, warning=FALSE, include=FALSE--------------------------------------------
+library(tidyverse)
+library(maps)
+library(mapdata)
+library(patchwork)
+library(timeplyr)
+library(ggrepel)
+library(broom)
+library(gt)
+library(knitr)
+library(scales)
+library(zoo)
+library(Kendall)
+
+
+#' 
+#' 
+#' # Global Sub-Daily Rainfall (GSDR)
+#' 
+#' The GSDR data set -- an acronym for Global Sub-Daily Rainfall -- was developed by members of the INTENSE project out of the United Kingdom. They acquired, and then applied a suite of quality control measures to, sub-daily rainfall observations recorded by a number of independent nations. 
+#' 
+#' ## GSDR-I: indices based on GSDR
+#' 
+#' The GSDR data were then used to create a suite of indices, which were published as GSDR-I, to aid the understanding of extreme sub-daily rainfall over as much of the earth's surface as possible. These indices were calculated at each supplied gauge, from which a new gridded product (at 1 degree spatial resolution) was also developed. 
+#' 
+#' ### Australian gauge-based indices not included
+#' 
+#' Whilst the indices were calculated for the Australian region, and indeed provided through the gridded product, the Australian Bureau of Meteorology provided data to the INTENSE project under a restricted sharing licence so the gauge indices were not publicly available through GSDR-I.
+#' 
+#' ### Calculating indices based on GSDR
+#' 
+#' More happily, the INTENSE project participants did however make their QC and index calculation code available alongside their publication (showing the value of this approach in open science!). Also happily, the post-QC data for Australia (as well as the pre-QC) were made available by the Bureau of Meteorology to Lisa Alexander of CLEX/UNSW, and subsequently shared with me.
+#' 
+#' Armed with the post-QC sub-daily rainfall data, I have been able to use the code and python environments published alongside the GSDR-I publication to recreate the GSDR-I gauge indices over Australia.
+#' 
+#' #### Locations of gauges in GSDR and GSDR-I_AUS
+#' 
+#' The first step is to read in the station metadata. There are two files, the first containing all stations, the second containing a list of stations that failed to compute indices (though no reason is supplied).
+#' 
+## ----load locations-----------------------------------------------------------------------------------------
+# read in site metadata
+StationMetadata_5min <- read_csv("GSDR/Indices_5min-postQC/StationMetadata.csv",
+                                 col_types = cols(Folder = col_skip(),
+                                                  Start = col_datetime(format = "%Y%m%d%H"),
+                                                  End = col_datetime(format = "%Y%m%d%H")))
+
+StationMetadata_1min <- read_csv("GSDR/Indices_1min-postQC/StationMetadata.csv",
+                                 col_types = cols(Folder = col_skip(),
+                                                  Start = col_datetime(format = "%Y%m%d%H"),
+                                                  End = col_datetime(format = "%Y%m%d%H")))
+
+# combine into one df:
+StationMetadata <- bind_rows(StationMetadata_1min, StationMetadata_5min, .id = "DataSource") %>% 
+  mutate(DataSource = as.factor(ifelse(DataSource == 2,"5min","1min")))
+
+# read in sites that failed to compute statistics
+FailedSites_5min <- read_csv("GSDR/Indices_5min-postQC/FailedFiles.csv",
+                             col_types = cols(Folder = col_skip()))
+
+FailedSites_1min <- read_csv("GSDR/Indices_1min-postQC/FailedFiles.csv",
+                             col_types = cols(Folder = col_skip()))
+
+# combine into one df:
+FailedSites <- bind_rows(FailedSites_1min, FailedSites_5min, .id = "DataSource") %>% 
+  mutate(DataSource = as.factor(ifelse(DataSource == 2,"5min","1min")))
+
+df_failed <- StationMetadata %>% semi_join(FailedSites, by = "FileName")
+df_succeeded <- StationMetadata %>% anti_join(FailedSites, by = "FileName")
+
+
+#' 
+#' Now that we have loaded the data we can produce spatial maps of the station locations. Firstly, I'll create a plotting function to produce the observation locations from different domains:
+#' 
+## ----create spatial map function----------------------------------------------------------------------------
+# domain bounds for all Australia:
+aus_lon_limits <- c(112, 156)
+aus_lat_limits <- c(-45, -10)
+
+# VIC domain bounds:
+vic_lon_limits <- c(140,151.25)
+vic_lat_limits <- c(-39.5,-32.8)
+
+# SYD domain bounds:
+syd_lon_limits <- c(148,153)
+syd_lat_limits <- c(-36,-31.8)
+
+# seq domain bounds:
+seq_lon_limits <- c(150,154)
+seq_lat_limits <- c(-29,-25)
+
+# Create plotting function for stations:
+plot_stations <- function(df, nmins, lon_limits, lat_limits, 
+                          region = "Australia", 
+                          filtering = NULL,
+                          facet = TRUE) {
+  if (is.null(filtering)) {
+    filter_label <- "No filtering of stations"
+  } else {
+    if (filtering == "failed") {
+      filter_label <- "Stations that failed indices creation"
+    }
+    if (filtering == "succeeded") {
+      filter_label <- "Stations that successfully created indices"
+    }
+  }
+  if (nmins == 1 | nmins == 5) {
+    df <- df %>% filter(DataSource == paste0(nmins,"min"))
+    # highlight <- "PercentMissing"
+    title_label <- paste0(nmins,"-minute observation stations from GSDR over ",region)
+    subtitle_label <- paste0(filter_label,", coloured by percent of missing data")
+    p <- df %>% ggplot(aes(x = Longitude, y = Latitude, colour = PercentMissing)) 
+  } else {
+    # highlight <- "DataSource"
+    title_label <- paste0("All observation stations from GSDR over ",region)
+    if (is.null(filtering)) {
+      subtitle_label <- NULL
+    } else {
+      subtitle_label <- filter_label
+    }
+    p <- df %>% ggplot(aes(x = Longitude, y = Latitude, colour = DataSource)) 
+  }
+  
+  p <- p +
+    # "fill" is land colour; "col" is border colour. 
+    # Ocean colour needs to be set as background of panel below.
+    annotation_map(map_data("worldHires"), fill = "antiquewhite", col = "grey25") +
+    geom_point(alpha = 0.3) +
+    # scale_color_gradient(low = "red", high = "blue") +
+    coord_sf(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+    ggtitle(title_label, 
+            subtitle = subtitle_label) + 
+    theme(panel.background = element_rect(fill = "lightsteelblue1"))
+  
+  if (nmins == 1 | nmins == 5) {
+    p + labs(colour = "%")
+  } else {
+    if (facet) {p <- p + facet_grid(~ DataSource)}
+    p + labs(colour = "Station\ntype")
+  }
+}
+
+
+#' 
+#' Now call this function for the Australian domain to view the 1-min and 5-min stations, as well as both in a panel plot:
+#' 
+## ----plot stations australia, echo=FALSE--------------------------------------------------------------------
+# plot stations in Aus domain:
+plot_stations(StationMetadata, 5, aus_lon_limits, aus_lat_limits)
+plot_stations(StationMetadata, 1, aus_lon_limits, aus_lat_limits)
+plot_stations(StationMetadata, "all", aus_lon_limits, aus_lat_limits)
+
+
+#' 
+#' 
+#' And now plot up the stations in the VIC-5 domain:
+#' 
+## ----plot stations victoria, echo=FALSE---------------------------------------------------------------------
+# plot stations in VIC-5 domain:
+plot_stations(StationMetadata, 5, vic_lon_limits, vic_lat_limits, region = "Victoria")
+plot_stations(StationMetadata, 1, vic_lon_limits, vic_lat_limits, region = "Victoria")
+plot_stations(StationMetadata, "all", vic_lon_limits, vic_lat_limits, region = "Victoria")
+
+
+#' #### Plot those sites for which we have statistics -- and those where we don't
+#' 
+#' * Stations where the creation of indices failed:
+#' 
+## ----plot failed stations australia, echo=FALSE-------------------------------------------------------------
+# plot stations in Aus domain:
+p5 <- plot_stations(df_failed, 5, aus_lon_limits, aus_lat_limits, filtering = "failed")
+p1 <- plot_stations(df_failed, 1, aus_lon_limits, aus_lat_limits, filtering = "failed")
+p1 + p5
+plot_stations(df_failed, "all", aus_lon_limits, aus_lat_limits, filtering = "failed")
+
+
+#' * Stations where the creation of indices succeeded:
+#' 
+## ----plot succeeded stations australia, echo=FALSE----------------------------------------------------------
+# plot stations in Aus domain:
+plot_stations(df_succeeded, 5, aus_lon_limits, aus_lat_limits, filtering = "succeeded")
+plot_stations(df_succeeded, 1, aus_lon_limits, aus_lat_limits, filtering = "succeeded")
+plot_stations(df_succeeded, "all", aus_lon_limits, aus_lat_limits, filtering = "succeeded")
+
+
+#' 
+#' 
+#' #### Reliability of gauge locations
+#' 
+#' That gives us all stations for each collection type (1 minute and 5 minute), but what about the length of data record, and the reliability of their observations?
+#' 
+#' For trend analysis, we really need a record length in excess of 20 years in order to have any hope of determining trends outside inter-decadal variability, and taking into account inter-annual variability. And in order to be able to assess extremes with confidence, we will need the percentage of missing data to be low, e.g. < 10% or 20%.
+#' 
+#' Which stations contain record lengths in excess of 20 years? What about 30, or 40? And of these, what level of completion do the data have over that time? Can we display those with 80%+ and 90%+?
+#' 
+## ----filter stations for reliability------------------------------------------------------------------------
+# how many of each category stations are there to begin with:
+StationMetadata %>% group_by(DataSource) %>% 
+  summarise(n())
+
+# create a function to find stations with long enough records:
+over_N_years <- function(df = StationMetadata, Nyears = 20) {
+  df %>% 
+    mutate(duration = (Start %--% End) / dyears()) %>% 
+    filter(duration > Nyears)
+}
+
+
+#' 
+#' ##### Stations with **20 year** minimum record length
+#' 
+## ----minimum of 20 years of records-------------------------------------------------------------------------
+# how many stations with over 20+ years of record length (first to last):
+over20y <- over_N_years(StationMetadata, 20)
+over20y %>% group_by(DataSource) %>% 
+  summarise(n())
+
+#' 
+#' ##### Stations with **30 year** minimum record length
+#' 
+## ----minimum of 30 years of records-------------------------------------------------------------------------
+# how many stations with over 30 years of record:
+over30y <- over_N_years(StationMetadata, 30)
+over30y %>% group_by(DataSource) %>% 
+  summarise(n())
+
+
+#' 
+#' **So out of the full `r nrow(StationMetadata)` stations in the metadata, there are `r nrow(over20y)` stations (~`r round(nrow(over20y)*100 / nrow(StationMetadata))`%) with over 20 years of record, and `r nrow(over30y)` stations (~`r round(nrow(over30y)*100 / nrow(StationMetadata))`%) with over 30 years. **
+#' 
+#' Many of the 1-minute stations only began recording relatively recently, so nearly all of these will be eliminated by these long record thresholds. In fact, the 20-year requirement eliminates all but `r nrow(over20y %>% filter(DataSource == "1min"))` stations out of `r nrow(StationMetadata_1min)` (`r 100 - round(nrow(over20y %>% filter(DataSource == "1min"))*100 / nrow(StationMetadata), digits = 1)`%), while the 30-year threshold leaves... `r nrow(over30y %>% filter(DataSource == "1min"))`!
+#' 
+#' Let's plot up these stations with over 20 and over 30 years of record:
+#' 
+## ----plot up remaining stations-----------------------------------------------------------------------------
+# 20-year length:
+plot_stations(over20y, nmins = "all", aus_lon_limits, aus_lat_limits) +
+  ggtitle("Observation stations with over 20 years of station record")
+# now with just the 5-minute data:
+plot_stations(over20y, nmins = 5, aus_lon_limits, aus_lat_limits) +
+  ggtitle("Observation stations with over 20 years of station record")
+#30-year length (5-min only, as there are 0 1-min stations left):
+plot_stations(over30y, nmins = 5, aus_lon_limits, aus_lat_limits) +
+  ggtitle("Observation stations with over 30 years of station record")
+
+#' 
+#' 
+#' The above plots examining observational record length do not yet take into account the level of completeness of each year, which is crucial for the calculation of annual maxima. This will be difficult to determine until we look in more detail at data for individual stations.
+#' 
+#' 
+#' ### Time series of annual maximum 1hr rainfall
+#' 
+#' Read in the annual maxima file for the 1hr accumulations:
+#' 
+## ----read in annual_rx1hr-----------------------------------------------------------------------------------
+TimeSeries_Annual_Rx1hr_1min <- read_csv("GSDR/Indices_1min-postQC/TimeSeries/Annual/TimeSeries_Annual_Rx1hr.csv",
+col_types = cols(Folder = col_skip()))
+TimeSeries_Annual_Rx1hr_5min <- read_csv("GSDR/Indices_5min-postQC/TimeSeries/Annual/TimeSeries_Annual_Rx1hr.csv",
+col_types = cols(Folder = col_skip()))
+TimeSeries_Annual_Rx1hr <- bind_rows(TimeSeries_Annual_Rx1hr_1min, TimeSeries_Annual_Rx1hr_5min, .id = "DataSource") %>% 
+  mutate(DataSource = as.factor(ifelse(DataSource == 2,"5min","1min")))
+
+#' 
+#' How many stations have enough annual maxima to enable reliable analysis of extreme values? (We can test a number of thresholds -- usually we require 20 values at a minimum, preferably 30.)
+#' 
+## ----stats on annual_rx1hr----------------------------------------------------------------------------------
+# how many annual maxima does each station contain? Might best be presented as a histogram:
+ann_max_count <- TimeSeries_Annual_Rx1hr %>% 
+  group_by(Station, DataSource) %>% 
+  summarise(n_maxima = n())
+# print summary statistics of number of annual max:
+summary(ann_max_count)
+
+#' 
+#' The median number of years for which annual max are available is only `r median(ann_max_count$n_maxima)`, so more than half our data do not have sufficient length of record -- let alone appropriate completeness. 
+#' 
+## ----count of number of annmax above thresholds-------------------------------------------------------------
+# How many stations have at least 20 annual max?
+n_gt_20 <- ungroup(ann_max_count) %>% filter(n_maxima >= 20) %>% summarise(n())
+# How about at least 30 years of maxima?
+n_gt_30 <- ungroup(ann_max_count) %>% filter(n_maxima >= 30) %>% summarise(n())
+
+#' There are `r as.integer(n_gt_20)` stations with 20 or more annual maxima values recorded, and `r as.integer(n_gt_30)` stations with 30 or more values.
+#' 
+#' We can plot this information in a histogram:
+## ----plot histogram of number of annmax for annual_rx1hr----------------------------------------------------
+# plot histogram of number of annual maxima:
+ann_max_count %>% 
+  # ggplot(aes(x = n_maxima)) +
+  # geom_histogram(binwidth = 1, boundary = 0.5, colour = "darkgrey", fill = "orange", alpha = 0.85) +
+  ggplot(aes(x = n_maxima, fill = DataSource)) +
+  geom_histogram(binwidth = 1, boundary = 0.5, colour = "darkgrey", alpha = 0.85) +
+  geom_vline(xintercept = 19.5, linetype = 2) +
+  annotate("text", x = 21.5, y = 90, size = 3, angle = 270,
+           label = paste0("20+ years: n = ",
+                          ungroup(ann_max_count) %>% filter(n_maxima >= 20) %>%
+                            summarise(n()) %>% as.integer())) +
+  geom_vline(xintercept = 29.5, linetype = 4) +
+  annotate("text", x = 31.5, y = 90, size = 3, angle = 270,
+           label = paste0("30+ years: n = ",
+                          ungroup(ann_max_count) %>% filter(n_maxima >= 30) %>%
+                            summarise(n()) %>% as.integer())) +
+  scale_x_continuous(expand = c(0, 1), name = "number of annual maxima at station") +
+  scale_y_continuous(expand = c(0, 1), name = "number of stations") +
+  ggtitle("Histogram of number of annual maxima at observation stations")
+
+#' 
+#' #### What about record completeness?
+#' 
+#' As we can see from the figure above displaying the location of the stations with adequate record lengths, not all of them have fully complete records -- that is to say they may have data missing from each year, even if they have hourly maximum values recorded.
+#' 
+#' We need to create a subset of stations from our annual maxima data that have a sufficient number of records.
+#' 
+## ----create subsets for 20+ and 30+ annmax records----------------------------------------------------------
+annmax_1hr_gt_20 <- ann_max_count %>% filter(n_maxima >= 20)
+annmax_1hr_gt_30 <- ann_max_count %>% filter(n_maxima >= 30)
+# annmax_1hr_gt_20
+# annmax_1hr_gt_30
+
+#' 
+#' Now we can extract those stations from the time series:
+#' 
+## ----filter stations over thresholds------------------------------------------------------------------------
+# get time series for stations with 20+ years
+ts_gt20 <- annmax_1hr_gt_20 %>% select(Station) %>% 
+  left_join(TimeSeries_Annual_Rx1hr, by = "Station")
+
+# get time series for stations with 30+ years
+ts_gt30 <- annmax_1hr_gt_30 %>% select(Station) %>% 
+  left_join(TimeSeries_Annual_Rx1hr, by = "Station")
+
+#' 
+#' Now we can look in more detail at the stations themselves, and filter out years with an unsatisfactory level of missing data. To get a feel for what kinds of values we see in this data set, let's do another histogram:
+#' 
+## ----histogram of year completeness-------------------------------------------------------------------------
+# calculate mean level of completeness for each station:
+completeness_gt20 <- ts_gt20 %>% group_by(Station) %>% 
+  summarise(mean_completeness = mean(Completeness, na.rm = T)) 
+completeness_gt30 <- ts_gt30 %>% group_by(Station) %>% 
+  summarise(mean_completeness = mean(Completeness, na.rm = T)) 
+# create histograms:
+completeness_gt20 %>% 
+  ggplot(aes(x = mean_completeness)) +
+  geom_histogram(binwidth = 1, boundary = 0, colour = "darkgrey", fill = "darkgreen", alpha = 0.65) +
+  geom_vline(xintercept = 80, linetype = 2) +
+  annotate("text", x = 81.5, y = 33, size = 3, angle = 270,
+           label = paste0("80+%:  n = ",
+                          completeness_gt20 %>% filter(mean_completeness >= 80) %>%
+                            summarise(n()) %>% as.integer())) +
+  scale_x_continuous(expand = c(0, 1), name = "mean completeness of annual maxima years (%)") +
+  scale_y_continuous(expand = c(0, 1), name = "number of stations") +
+  ggtitle("Mean annual completeness percentage of annual maxima at observation stations",
+          subtitle = "Stations with 20+ years of annual maxima available")
+# 30 years:
+completeness_gt30 %>% 
+  ggplot(aes(x = mean_completeness)) +
+  geom_histogram(binwidth = 1, boundary = 0, colour = "darkgrey", fill = "darkblue", alpha = 0.5) +
+  geom_vline(xintercept = 80, linetype = 2) +
+  annotate("text", x = 81.5, y = 24, size = 3, angle = 270,
+           label = paste0("80+%:  n = ",
+                          completeness_gt30 %>% filter(mean_completeness >= 80) %>%
+                            summarise(n()) %>% as.integer())) +
+  scale_x_continuous(expand = c(0, 1), name = "mean completeness of annual maxima years (%)") +
+  scale_y_continuous(expand = c(0, 1), name = "number of stations") +
+  ggtitle("Mean annual completeness percentage of annual maxima at observation stations",
+          subtitle = "Stations with 30+ years of annual maxima available")
+
+
+#' There are seemingly two clear options here: 
+#' 
+#' 1. eliminate stations with poor mean completeness in maxima years; or
+#' 2. eliminate individual years that have poor completeness, and then assess whether a station still has enough valid data for analysis.
+#' 
+#' Let's try option 2 first, as I think it is the more correct option:
+#' 
+## ----filter out low completeness years----------------------------------------------------------------------
+# filter out years with low completeness values
+ts_20y_80pc <- ts_gt20 %>% filter(Completeness >= 80)
+ts_30y_80pc <- ts_gt30 %>% filter(Completeness >= 80)
+
+#' 
+#' How many stations does this leave us with?
+#' 
+## ----count remaining stations-------------------------------------------------------------------------------
+# 20 years minimum:
+annmax_count_gt20y_80pc <- ts_20y_80pc %>% group_by(Station) %>% 
+  summarise(n_years = n()) %>% 
+  filter(n_years >= 20)
+n_annmax_count_gt20y_80pc <- nrow(annmax_count_gt20y_80pc)
+# 30 years minimum:
+annmax_count_gt30y_80pc <- ts_30y_80pc %>% group_by(Station) %>% 
+  summarise(n_years = n()) %>% 
+  filter(n_years >= 30)
+n_annmax_count_gt30y_80pc <- nrow(annmax_count_gt30y_80pc)
+
+
+#' 
+#' We are left with `r n_annmax_count_gt20y_80pc` stations with 20+ years of annual maxima records of over 80% completeness.  If the bar is raised to 30+ years, we have `r n_annmax_count_gt30y_80pc` stations left.
+#' 
+#' When compared with the values filtered by *mean completeness over 80%* instead of *filtering out years with insufficient data coverage (<80%)*, we now have more stations to analyse. We had `r completeness_gt20 %>% filter(mean_completeness >= 80) %>% summarise(n()) %>% as.integer()` stations above 80%, which is `r n_annmax_count_gt20y_80pc - (completeness_gt20 %>% filter(mean_completeness >= 80) %>% summarise(n()) %>% as.integer())` fewer than we have now; **we have squeezed out an extra `r 100 * (n_annmax_count_gt20y_80pc - (completeness_gt20 %>% filter(mean_completeness >= 80) %>% summarise(n()) %>% as.integer())) / (completeness_gt20 %>% filter(mean_completeness >= 80) %>% summarise(n()) %>% as.integer())`% more stations** by extracting as many 80+% coverage years as possible for each station.
+#' 
+#' #### Where are these stations with adequate annual maxima?
+#' 
+#' Extract time series for our remaining stations:
+#' 
+## ----filter for remaining annual maxima stations------------------------------------------------------------
+# create new time series with our subset of stations:
+# get time series for stations with 20+ years
+ts_gt20y_80pc <- annmax_count_gt20y_80pc %>% select(Station) %>% 
+  left_join(ts_20y_80pc, by = "Station")
+# get time series for stations with 30+ years
+ts_gt30y_80pc <- annmax_count_gt30y_80pc %>% select(Station) %>% 
+  left_join(ts_30y_80pc, by = "Station")
+
+#' 
+#' Spatial plots of our remaining stations:
+#' 
+## ----plot remaining annual maxima stations------------------------------------------------------------------
+plot_stations(ts_gt20y_80pc, nmins = "all", aus_lon_limits, aus_lat_limits) +
+  ggtitle("Observation stations with over 20 years of station record",
+          subtitle = "Filtered for years with 80+% completeness")
+plot_stations(ts_gt30y_80pc, nmins = "all", aus_lon_limits, aus_lat_limits) +
+  ggtitle("Observation stations with over 30 years of station record",
+          subtitle = "Filtered for years with 80+% completeness")
+
+
+#' 
+#' We can see that we have retained a reasonable geographic spread of stations across the country with adequate completeness and coverage, including Tasmania. 
+#' 
+#' There is, however, a large drop-off in the number of stations available that have adequate completeness of data for 30 years or more compared to 20+ years. For this reason I will continue analysis using the 20+ year stations.
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' ## Data analysis
+#' 
+#' Now we have filtered our data to those stations with adequate record length and completeness, we can start to look at the values reported.
+#' 
+#' #### Calculate statistics based on all qualifying records
+#' 
+#' We can start by doing a very simple minimum, mean, median and maximum of Rx1hr values for **ALL YEARS**:
+#' 
+## ----calculate median, mean, maximum rx1hr for each station-------------------------------------------------
+rx1hr_summary_all_years_gt20y <- ts_gt20y_80pc %>% 
+  group_by(Station, DataSource, Longitude, Latitude) %>% 
+  summarise(minimum = min(Value, na.rm = T),
+            median = median(Value, na.rm = T),
+            mean = mean(Value, na.rm = T),
+            maximum = max(Value, na.rm = T))
+
+#' 
+#' Need to create a new station plotting function:
+## ----function for plotting the median mean maximum rx1hr for each station-----------------------------------
+# Create plotting function for stations:
+plot_station_stats <- function(df, stat, 
+                               lon_limits, lat_limits, 
+                               region = "Australia", 
+                               facet = FALSE) {
+  title_label <- paste0(str_to_sentence(stat), " of Rx1hr at observation stations from GSDR over ",region)
+  subtitle_label <- NULL
+  
+  p <- ungroup(df) %>% ggplot(aes_string(x = "Longitude", y = "Latitude", colour = stat)) +
+    # "fill" is land colour; "col" is border colour. 
+    # Ocean colour needs to be set as background of panel below.
+    annotation_map(map_data("worldHires"), fill = "antiquewhite", col = "grey25") +
+    geom_point(alpha = 0.7, size = 2.5) +
+    scale_colour_viridis_c(option = "H") +
+    coord_sf(xlim = lon_limits, ylim = lat_limits, expand = FALSE) +
+    ggtitle(title_label, 
+            subtitle = subtitle_label) + 
+    theme(panel.background = element_rect(fill = "lightsteelblue1"))
+
+    p + labs(colour = "mm/hour")
+
+}
+
+#' 
+#' #### Plotting station values
+#' 
+#' Now we can try plotting up these statistical treatments of our Rx1hr time series:
+#' 
+## ----plot median mean maximum rx1hr for each station, message=FALSE, warning=FALSE--------------------------
+# plot the minimum values:
+plot_station_stats(select(rx1hr_summary_all_years_gt20y, Longitude, Latitude, minimum), 
+              stat = "minimum", aus_lon_limits, aus_lat_limits) +
+  scale_colour_viridis_c(option = "H", limits = c(3, NA))
+# plot the median values:
+plot_station_stats(select(rx1hr_summary_all_years_gt20y, Longitude, Latitude, median), 
+              stat = "median", aus_lon_limits, aus_lat_limits) +
+  scale_colour_viridis_c(option = "H", 
+                         # limits = c(7, 55))
+                         limits = c(min(min(rx1hr_summary_all_years_gt20y$median), min(rx1hr_summary_all_years_gt20y$mean)), 
+                                    max(max(rx1hr_summary_all_years_gt20y$median), max(rx1hr_summary_all_years_gt20y$mean))))
+# plot the mean values:
+plot_station_stats(select(rx1hr_summary_all_years_gt20y, Longitude, Latitude, mean), 
+              stat = "mean", aus_lon_limits, aus_lat_limits) +
+  scale_colour_viridis_c(option = "H", 
+                         # limits = c(7, 55))
+                         limits = c(min(min(rx1hr_summary_all_years_gt20y$median), min(rx1hr_summary_all_years_gt20y$mean)), 
+                                    max(max(rx1hr_summary_all_years_gt20y$median), max(rx1hr_summary_all_years_gt20y$mean))))
+# plot the maximum values:
+plot_station_stats(select(rx1hr_summary_all_years_gt20y, Longitude, Latitude, maximum), 
+              stat = "maximum", aus_lon_limits, aus_lat_limits) +
+  scale_colour_viridis_c(option = "H", limits = c(15, NA))
+
+#' 
+#' These plots show that the minimum, mean and median values of Rx1hr are closely related to their geographic location. Values increase moving from the extra-tropical south to the tropical north, with higher values close to the coast along the eastern seaboard. For the minimum case, lower values extend closer to the coast from the more arid inland regions of the continent, reflecting the more variable nature of inter-annual rainfall in these regions.
+#' 
+#' The maximum values exhibit a broadly similar pattern, but are less spatially coherent. The values are dominated by very high observations at a handful of stations; these are not always aligned with the highest mean and median values. This 'stretching' of the colour bar makes it more difficult to discern where these values look different to those from the mean/median, so I'll try plotting them up with a log colour scale.
+#' 
+#' #### Plotting station values -- log values
+#' 
+## ----replot with log scale, echo=TRUE, message=FALSE, warning=FALSE-----------------------------------------
+# plot the median values:
+plot_station_stats(select(rx1hr_summary_all_years_gt20y, Longitude, Latitude, median), 
+              stat = "median", aus_lon_limits, aus_lat_limits) +
+  scale_colour_viridis_c(name = "mm/hour", trans = "log", option = "H",
+                        breaks = c(5,10,20,30,40,50), labels = c(5,10,20,30,40,50),
+                        limits = c(min(min(rx1hr_summary_all_years_gt20y$median), min(rx1hr_summary_all_years_gt20y$mean)), 
+                                   max(max(rx1hr_summary_all_years_gt20y$median), max(rx1hr_summary_all_years_gt20y$mean))))
+# plot the mean values:
+plot_station_stats(select(rx1hr_summary_all_years_gt20y, Longitude, Latitude, mean), 
+              stat = "mean", aus_lon_limits, aus_lat_limits) +
+  scale_colour_viridis_c(name = "mm/hour", trans = "log", option = "H",
+                        breaks = c(5,10,20,30,40,50), labels = c(5,10,20,30,40,50),
+                        limits = c(min(min(rx1hr_summary_all_years_gt20y$median), min(rx1hr_summary_all_years_gt20y$mean)), 
+                                   max(max(rx1hr_summary_all_years_gt20y$median), max(rx1hr_summary_all_years_gt20y$mean))))
+# plot the maximum values:
+plot_station_stats(select(rx1hr_summary_all_years_gt20y, Longitude, Latitude, maximum),
+              stat = "maximum", aus_lon_limits, aus_lat_limits) +
+  scale_colour_viridis_c(name = "mm/hour", trans = "log", option = "H",
+                        breaks = c(10,25,50,75,100,150), labels = c(10,25,50,75,100,150),
+                        limits = c(20, 150))
+
+
+#' 
+#' Utilising a log scale makes the geographical relationship with median and mean Rx1hr more obvious, and also allows us to see more clearly that the maxima are less clearly correlated with the mean rainfall climatology. This indicates that these events are more stochastic in nature and will be more related to local scale processes and dynamics than synoptic scale features that would impact over larger areas. There is still a tendency towards higher maxima in tropical and coastal regions, particularly along the eastern seaboard, but this is far less clear than in the mean and median values.
+#' 
+#' 
+#' 
+#' 
+#' ### Testing time series of stations with the top 10 maxima
+#' 
+#' I'm going to try testing out a time series view now, plotting up the 10 stations with the highest maximum hourly values for their entire time series.
+#' 
+#' First, create the time series of stations with the top 10 annual maxima of rx1hr:
+#' 
+## ----make top 10 data---------------------------------------------------------------------------------------
+# make list of stations with top 10 of max values
+rx1hr_top10_all_years_gt20y_stations <- ungroup(rx1hr_summary_all_years_gt20y) %>% 
+  arrange(desc(maximum)) %>% head(10) %>% select(Station, Longitude, Latitude, maximum)
+# make df of rx1hr annmax time series for these stations
+rx1hr_top10_all_years_gt20y <- inner_join(select(rx1hr_top10_all_years_gt20y_stations, Station), ts_20y_80pc, by = "Station") 
+
+#' 
+#' Out of interest, where are these stations located?
+#' 
+## ----plot top 10 locations, message=FALSE, warning=FALSE----------------------------------------------------
+# plot station locations of top 10 max values:
+top10_station_plot <- plot_station_stats(select(rx1hr_top10_all_years_gt20y_stations, Longitude, Latitude, maximum),
+              stat = "maximum", aus_lon_limits, aus_lat_limits) +
+  scale_colour_viridis_c(name = "mm/hour", option = "F", begin = 0.5, end = 0.51, guide = F)
+
+top10_station_plot +
+  geom_text_repel(data = rx1hr_top10_all_years_gt20y_stations, aes(label = Station), 
+                  seed = 5, size = 2.5, direction = "x") +
+  ggtitle("Location of stations with top 10 maximum Rx1hr values")
+
+#' 
+#' Note these stations are not all located in the same region, but rather dispersed around the eastern and northern seaboard of the continent -- although 7 of the 10 are in Queensland.
+#' 
+#' 
+#' 
+#' 
+#' 
+#' #### Time series plots
+#' 
+#' Now, create time series plots of these stations:
+#' 
+## ----top 10 time series plots, fig.width=12, fig.height=6---------------------------------------------------
+# plot each station on its own time series:
+rx1hr_top10_all_years_gt20y %>% 
+  group_by(Station) %>% arrange(Station) %>% 
+  mutate(ts_max_index = if_else(Value == max(Value, na.rm = T), "max", NA_character_)) %>% 
+  ggplot(aes(x = Year, y = Value)) + 
+  geom_point(aes(colour = ts_max_index), show.legend = FALSE) +
+  geom_path(colour = "darkgrey", alpha = 0.75) +
+  labs(x = NULL, y = "mm/hour") +
+  theme_bw() +
+  facet_wrap(~ Station, scales = "free_y", nrow = 5) +
+  ggtitle("Time series for stations with top 10 maximum values")
+
+
+#' 
+#' Some strange things happening in a few of these time series, for example the long straight lines between values for station AU_14198. These indicate periods where no data was recorded, leading to an unrealistic interpolation between points of the time series. We can try to rectify this by inserting 'NA' for years that are missing values:
+#' 
+## ----add na to time series----------------------------------------------------------------------------------
+rx1hr_top10_all_years_gt20y_na <- rx1hr_top10_all_years_gt20y %>% 
+  mutate(Year = as_date(paste0(Year,"-01-01"))) %>% 
+  # filter(Station == "AU_14198") %>% 
+  time_complete(Year, .by = Station, time_by = "year", 
+                  fill = list(Value = NA))
+head(rx1hr_top10_all_years_gt20y_na)
+
+#' 
+#' Now we have added a value of `NA` for each the years in each station's time series where there was no value in our filtered data. (There may well have been data for these years with a lower than accepted value of completeness, which would have excluded these values from our data.)
+#' 
+#' Let's try plotting the time series again:
+#' 
+## ----top 10 time series plots with na, warning=FALSE, fig.width=12, fig.height=6----------------------------
+# plot each station on its own time series in ggplot:
+rx1hr_top10_all_years_gt20y_na %>% 
+  group_by(Station) %>% arrange(Station) %>% 
+  mutate(ts_max_index = if_else(Value == max(Value, na.rm = T), "max", NA_character_)) %>% 
+  ggplot(aes(x = Year, y = Value)) + 
+  geom_point(aes(colour = ts_max_index), show.legend = FALSE) +
+  geom_path(colour = "darkgrey", alpha = 0.75) +
+  labs(x = NULL, y = "mm/hour") +
+  theme_bw() +
+  # scale_x_date(guide = guide_axis(n.dodge=1)) +
+  facet_wrap(~ Station, scales = "free_y", nrow = 5) +
+  ggtitle("Time series for stations with top 10 maximum values")
+
+#' 
+#' That looks pretty good, though the long time scale of the longest time series bunches up the observations, and makes it hard to see what year the maximum values were achieved. Nonetheless, it's a good start.
+#' 
+#' What does it look like if we try to plot up _all_ of the ~423(?) station time series? (Not sure that this is going to work...)
+#' 
+## ----all time series plots with na, warning=FALSE-----------------------------------------------------------
+# plot each station on its own time series:
+ts_gt20y_80pc %>% 
+  group_by(Station) %>% arrange(Station) %>% 
+  mutate(ts_max_index = if_else(Value == max(Value, na.rm = T), "max", NA_character_), 
+         Year = as_date(paste0(Year,"-01-01"))) %>% 
+  ggplot(aes(x = Year, y = Value)) + 
+  geom_point(aes(colour = ts_max_index), show.legend = FALSE) +
+  geom_path(colour = "darkgrey", alpha = 0.75) +
+  facet_wrap(~ Station, scales = "free_y", nrow = 4) +
+  theme_bw() +
+  labs(x = NULL, y = "mm/hour") +
+  # scale_x_date(guide = guide_axis(n.dodge=1)) +
+  ggtitle("Time series for all stations annual maximum values of Rx1hr")
+
+#' LOL! That _really_ didn't work.
+#' 
+#' Try again, this time limiting to a more tractable number of stations? 
+#' 
+## ----add group id to time series----------------------------------------------------------------------------
+# add label for max value and group id to time series, and fill in missing years in time series:
+# ts_gt20y_80pc
+indexed_ts_gt20y_80pc <- ts_gt20y_80pc %>% 
+  group_by(Station) %>% arrange(Station) %>%  
+  mutate(ts_max_index = if_else(Value == max(Value, na.rm = T), "max", NA_character_), 
+         Year = as_date(paste0(Year,"-01-01"))) %>% 
+    time_complete(Year, time_by = "year", fill = list(Value = NA)) %>% 
+  mutate(g = cur_group_id())
+
+indexed_ts_20y_80pc <- ts_20y_80pc %>% 
+  group_by(Station) %>% arrange(Station) %>%  
+  mutate(ts_max_index = if_else(Value == max(Value, na.rm = T), "max", NA_character_), 
+         Year = as_date(paste0(Year,"-01-01"))) %>% 
+    time_complete(Year, time_by = "year", fill = list(Value = NA)) %>% 
+  mutate(g = cur_group_id())
+
+#' 
+#' Now we have an index for each group, we can filter for which groups to plot in our faceting:
+#' 
+## ----selected time series plots with na, warning=FALSE, fig.width=12, fig.height=6--------------------------
+# select which station index to start/end plotting:
+station_1 <- 1
+station_N <- station_1 + 11
+
+# plot selected stations time series:
+indexed_ts_gt20y_80pc %>% 
+  filter(g %in% c(station_1:station_N)) %>% group_by(Station) %>% 
+  ggplot(aes(x = Year, y = Value)) +
+  geom_point(aes(colour = ts_max_index), alpha = 0.7, show.legend = FALSE) +
+  geom_path(colour = "darkgrey") +
+  facet_wrap(~ Station, scales = "free_y", nrow = 4) +
+  theme_bw() +
+  labs(x = NULL, y = "mm/hour") +
+  ggtitle(paste0("NEW Time series of annual maximum Rx1hr for stations ",station_1,"-",station_N))
+
+indexed_ts_20y_80pc %>% 
+  filter(g %in% c(station_1:station_N)) %>% group_by(Station) %>% 
+  ggplot(aes(x = Year, y = Value)) +
+  geom_point(aes(colour = ts_max_index), alpha = 0.7, show.legend = FALSE) +
+  geom_path(colour = "darkgrey") +
+  facet_wrap(~ Station, scales = "free_y", nrow = 4) +
+  theme_bw() +
+  labs(x = NULL, y = "mm/hour") +
+  ggtitle(paste0("OLD Time series of annual maximum Rx1hr for stations ",station_1,"-",station_N))
+
+
+#' 
+#' ~~Well, this has turned up a problem: we seem to still have locations being plotted that have fewer than 20 years of data points. I'll need to check that I've applied the correct filtering above in order to only include those stations with adequate record lengths over the entirety of the record.~~ *Correction -- I was just using the wrong data set! I was using the data set prior to filtering out stations with not enough (<20) years of adequate completeness (labelled "OLD" above). The appropriate data set (labelled "NEW") does not have this issue. **phew!** *
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' <!-- #### Refining data length function -->
+#' 
+#' <!-- The function I wrote above, `over_N_years`, uses the duration of time between the first and last years of a station's record to infer the record length. However, this doesn't take into account that some years within that period may not have adequate completeness. I should refine/extend it to only count those years exceeding a completeness threshold, so that we have the requisite record length for trends and extreme value analysis. -->
+#' 
+#' <!-- ```{r refining record length function} -->
+#' <!-- # original function: -->
+#' <!-- # over_N_years <- function(df = StationMetadata, Nyears = 20) { -->
+#' <!-- #   df %>%  -->
+#' <!-- #     mutate(duration = (Start %--% End) / dyears()) %>%  -->
+#' <!-- #     filter(duration > Nyears) -->
+#' <!-- # } -->
+#' 
+#' <!-- over_N_valid_years <- function(df = StationMetadata, Nyears = 20, threshold = 80) { -->
+#' <!--   df %>%  -->
+#' <!--     over_N_years(df, Nyears) %>% # this gives us a subset of stations exceeding Nyears difference between first and last years of record -->
+#' <!--     # mutate(duration = (Start %--% End) / dyears()) %>%  -->
+#' <!--     # filter(duration > Nyears) -->
+#' 
+#' 
+#' <!-- } -->
+#' 
+#' <!-- ``` -->
+#' 
+#' 
+#' 
+#' ----
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' ## Examining the last _N_ years of available record
+#' 
+#' We are actually going to be most interested in the more recent period of the data. As our supplied data only run up to 2015 -- now 8 years in the past -- we want to use the most recent data possible in order to best represent the current climatology.
+#' 
+#' <!-- So first of all we want to decide on what  -->
+#' 
+#' Let's look at the number (and location) of stations with adequate data coverage for the more recent part of the observational record. To start with, we can look at stations with adequate completeness for 20+ years since:
+#' 
+#' - 1990, 
+#' - 1986, and 
+#' - 1981.
+#' 
+#' #### Write function to filter suitable records within a period
+#' 
+## ----write function filtering records within a certain period-----------------------------------------------
+
+valid_years_in_period <- function(df = ts_gt20y_80pc, 
+                               Nyears = 20, 
+                               # threshold = 80,
+                               oldest = 1981, newest = 2015) {
+  df <- df %>%
+    # filter out records before $oldest and after $newest
+    filter(Year >= oldest, Year <= newest) 
+  
+  # check that we have an adequate number of records (Nyears+):
+  n_per_station <- df %>% 
+    ungroup() %>% group_by(Station) %>% 
+    summarise(n_years = n()) %>% 
+    filter(n_years >= Nyears)
+
+  if (nrow(n_per_station) > 0) {
+    # extract stations with adequate records:
+    n_per_station %>% select(Station) %>% 
+      left_join(df, by = "Station") %>% 
+      group_by(Station) %>% arrange(Station) %>%  
+      mutate(ts_max_index = if_else(Value == max(Value, na.rm = T), "max", NA_character_), 
+             Year = as_date(paste0(Year,"-01-01"))) %>% 
+      time_complete(Year, time_by = "year", fill = list(Value = NA)) %>% 
+      mutate(g = cur_group_id())
+  } else {
+    stop("No stations meet the criteria")
+  }
+  
+}
+
+
+#' 
+#' 
+#' ### Extract station data for relevant periods
+#' 
+#' Extracting time series of suitably complete data for the three periods identified above:
+#' 
+## ----limited time data sets---------------------------------------------------------------------------------
+# extract stations with adequate coverage for 1981-2015, 1986-2015 and 1991-2015
+ts_gt20y_80pc_1981_2015 <- valid_years_in_period(ts_gt20y_80pc, oldest = 1981, newest = 2015) 
+ts_gt20y_80pc_1986_2015 <- valid_years_in_period(ts_gt20y_80pc, oldest = 1986, newest = 2015) 
+ts_gt20y_80pc_1991_2015 <- valid_years_in_period(ts_gt20y_80pc, oldest = 1991, newest = 2015) 
+
+
+#' 
+#' 
+#' ### Create rainfall statistics based on these periods
+#' 
+#' Before we go into trends and significance, we'll create a table -- similar to that made earlier -- of the statistics for each station's annual maximum of 1hr rainfall, this time based on each of the trimmed periods:
+#' 
+## ----summarise stats of trimmed time series-----------------------------------------------------------------
+
+# function to create summary stats table of time series
+summarise_filtered_ts <- function(df, oldest = 1981, newest = 2015) {
+  df %>% 
+    group_by(Station, DataSource, Longitude, Latitude) %>% 
+    summarise(minimum = min(Value, na.rm = T),
+              median = median(Value, na.rm = T),
+              mean = mean(Value, na.rm = T),
+              maximum = max(Value, na.rm = T)) %>% 
+    mutate(year_start = oldest, year_end = newest, .after = Latitude) %>% 
+    # filter out rows with invalid stations
+    filter(!is.na(Latitude))
+}
+
+# Create summary stats tables for each station:
+rx1hr_summary_gt20y_1981_2015 <- summarise_filtered_ts(ts_gt20y_80pc_1981_2015, 1981, 2015)
+rx1hr_summary_gt20y_1986_2015 <- summarise_filtered_ts(ts_gt20y_80pc_1986_2015, 1986, 2015)
+rx1hr_summary_gt20y_1991_2015 <- summarise_filtered_ts(ts_gt20y_80pc_1991_2015, 1991, 2015)
+
+# Combine these into one large stats table, retaining start and end filtered years:
+rx1hr_summary_gt20y_all <- rx1hr_summary_gt20y_1981_2015 %>% 
+  # full_join(rx1hr_summary_gt20y_1986_2015, by = c("Station", "DataSource", "Latitude", "Longitude", "year_start", "year_end",
+  #                                                 "minimum", "median", "mean", "maximum")) %>%
+  # full_join(rx1hr_summary_gt20y_1991_2015, by = c("Station", "DataSource", "Latitude", "Longitude", "year_start", "year_end",
+  #                                                 "minimum", "median", "mean", "maximum")) %>%
+  bind_rows(rx1hr_summary_gt20y_1986_2015) %>%
+  bind_rows(rx1hr_summary_gt20y_1991_2015) %>%
+  arrange(Station, year_start, year_end)
+
+
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 
+#' ### Plot time series of these stations with trends
+#' 
+#' Let's produce time series for each of our valid stations with accompanying trend lines.
+#' 
+#' Now we've got our extracted data, we can produce trended time series plots:
+#' 
+## ----plot limited time series, warning=FALSE, fig.width=12, fig.height=6------------------------------------
+# select which station index to start/end plotting:
+# station_1 <- 1
+# station_N <- station_1 + 11
+# 
+# # plot time series
+# ts_gt20y_80pc_1981_2015 %>% 
+#   filter(g %in% c(station_1:station_N)) %>% group_by(Station) %>% 
+#   ggplot(aes(x = Year, y = Value)) +
+#   geom_point(aes(colour = ts_max_index), alpha = 0.7, show.legend = FALSE) +
+#   geom_path(colour = "darkgrey") +
+#   geom_smooth(method = "lm", se = T) +
+#   facet_wrap(~ Station, scales = "free_y", nrow = 4) +
+#   theme_bw() +
+#   labs(x = NULL, y = "mm/hour") +
+#   ggtitle(paste0("Time series of annual maximum Rx1hr for stations ",station_1,"-",station_N))
+
+# function for plotting 12 faceted plots at a time
+plot_ts <- function(df, 
+                    station1 = 1, stationN = 12,
+                    oldest = 1981, newest = 2015) {
+  df %>% 
+    filter(g %in% c(station1:stationN)) %>% group_by(Station) %>% 
+    ggplot(aes(x = Year, y = Value)) +
+    geom_point(aes(colour = ts_max_index), alpha = 0.7, show.legend = FALSE) +
+    geom_path(colour = "darkgrey") +
+    geom_smooth(method = "lm", se = T) +
+    facet_wrap(~ Station, scales = "free_y", nrow = 4) +
+    theme_bw() +
+    labs(x = NULL, y = "mm/hour") +
+    ggtitle(paste0("Time series (",oldest,"-",newest,") of annual maximum Rx1hr for stations ",
+                   station1,"-",stationN))
+}
+
+plot_ts(ts_gt20y_80pc_1981_2015, oldest = 1981, newest = 2015)
+plot_ts(ts_gt20y_80pc_1981_2015, oldest = 1981, newest = 2015, station1 = 13, stationN = 24)
+plot_ts(ts_gt20y_80pc_1981_2015, oldest = 1981, newest = 2015, station1 = 25, stationN = 36)
+
+plot_ts(ts_gt20y_80pc_1986_2015, oldest = 1986, newest = 2015)
+plot_ts(ts_gt20y_80pc_1986_2015, oldest = 1986, newest = 2015, station1 = 13, stationN = 24)
+plot_ts(ts_gt20y_80pc_1986_2015, oldest = 1986, newest = 2015, station1 = 25, stationN = 36)
+
+plot_ts(ts_gt20y_80pc_1991_2015, oldest = 1991, newest = 2015)
+plot_ts(ts_gt20y_80pc_1991_2015, oldest = 1991, newest = 2015, station1 = 13, stationN = 24)
+plot_ts(ts_gt20y_80pc_1991_2015, oldest = 1991, newest = 2015, station1 = 25, stationN = 36)
+
+
+#' 
+#' 
+#' 
+#' 
+#' 
+#' ### Significance testing on linear trends
+#' 
+#' These time series plots are interesting, but we still have many, many more stations to examine, so looking at time series plots is not a great way to determine if trends are significant. Instead, we can do trend significance testing.
+#' 
+#' 
+## ----trend significance testing, eval=FALSE, include=FALSE--------------------------------------------------
+## rx1hr.lm <- lm(Value ~ Year, data = filter(
+##   mutate(ts_gt20y_80pc_1981_2015, Year = year(Year)),
+##   g == 10))
+## 
+## summary(rx1hr.lm)
+## anova(rx1hr.lm)
+
+#' 
+#' 
+## ----trend significance testing via mann kendall, eval=FALSE, include=FALSE---------------------------------
+## # library(zoo)
+## # library(Kendall)
+## #
+## # ts <- read.zoo(filter(mutate(ts_gt20y_80pc_1981_2015, Year = year(Year)), g == 10) %>% ungroup() %>% select(Year, Value))
+## # MK_test <- MannKendall(ts)
+## # MK_test$sl[1]
+
+#' 
+#' 
+## ----trend significance testing via mann kendall alternate, eval=FALSE, include=FALSE-----------------------
+## # library(trend)
+## # # MK_test2 <- mk.test(ts)
+## # # # Error in na.fail.default(x) : missing values in object
+## # # MK_test2
+## # ts
+## # na.omit(ts)
+## # MannKendall(ts)
+## # MannKendall(na.omit(ts))
+## # mk.test(na.omit(ts))
+## # MK_test2 <- mk.test(na.omit(ts))
+## # MK_test2
+
+#' 
+## ----using GGAlly, eval=FALSE, include=FALSE----------------------------------------------------------------
+## # library(GGally)
+## # filter(ts_gt20y_80pc_1981_2015, g == 10) %>%
+## #   select(Year, Value) %>%
+## #   ggpairs()
+
+#' 
+#' 
+## ----using base r cor.test, eval=FALSE, include=FALSE-------------------------------------------------------
+## # using base function for correlation testing
+## g1 <- filter(ts_gt20y_80pc_1981_2015, g == 1) %>% mutate(Year = year(Year))
+## st1 <- cor.test(g1$Year, g1$Value)
+## st1$p.value
+## 
+## g10 <- filter(ts_gt20y_80pc_1981_2015, g == 10) %>% mutate(Year = year(Year))
+## st10 <- cor.test(g10$Year, g10$Value)
+## st10$p.value
+## st10
+## 
+
+#' 
+#' 
+#' 
+## ----calculate corr test results----------------------------------------------------------------------------
+# write function to produce df of correlation test trend estimates and p-values
+test_estimates <- function(df, oldest = 1981, newest = 2015) {
+
+  require(broom)
+  df %>% 
+    mutate(Year = year(Year)) %>% 
+    group_by(Station) %>% 
+    do(tidy(lm(Value ~ Year, .))) %>% 
+    filter(term == "Year") %>% 
+    select(-term) %>% 
+    mutate(p.value = round(p.value, digits = 5)) %>% 
+    mutate(year_start = oldest, year_end = newest, .after = Station) %>% 
+    arrange(Station)
+  
+}
+
+te_1981_2015 <- test_estimates(ts_gt20y_80pc_1981_2015, 1981, 2015)
+# te_1981_2015 %>% filter(p.value <= 0.05)
+# te_1981_2015 %>% filter(p.value <= 0.05, estimate > 0)
+# te_1981_2015 %>% filter(p.value <= 0.05, estimate < 0)
+
+te_1986_2015 <- test_estimates(ts_gt20y_80pc_1986_2015, 1986, 2015)
+# te_1986_2015 %>% filter(p.value <= 0.05)
+# te_1986_2015 %>% filter(p.value <= 0.05, estimate > 0)
+# te_1986_2015 %>% filter(p.value <= 0.05, estimate < 0)
+
+te_1991_2015 <- test_estimates(ts_gt20y_80pc_1991_2015, 1991, 2015)
+# te_1991_2015 %>% filter(p.value <= 0.05)
+# te_1991_2015 %>% filter(p.value <= 0.05, estimate > 0)
+# te_1991_2015 %>% filter(p.value <= 0.05, estimate < 0)
+
+#' 
+#' 
+## ----calculate corr test results alternate------------------------------------------------------------------
+# write function to produce df of correlation test trend estimates and p-values
+modified_mk_test <- function(x, ...) {
+  require(zoo)
+  ts <- read.zoo(mutate(x, Year = year(Year)) %>% ungroup() %>% select(Year, Value))
+  result <- MannKendall(ts, ...)
+  
+  tibble(
+    p.value_mk = round(result$sl[1], digits = 5)
+  )
+  
+}
+
+# df <- ts_gt20y_80pc_1981_2015
+
+test_estimates_mk <- function(df, oldest = 1981, newest = 2015) {
+
+  require(zoo)
+  require(Kendall)
+
+  # mkt_result <- df %>%
+  df %>%
+    group_by(Station) %>%
+    group_modify(~ modified_mk_test(.x)) %>% 
+    mutate(year_start = oldest, year_end = newest, .after = Station) %>% 
+    arrange(Station)
+
+}
+
+# te_mk_1981_2015 <- test_estimates_mk(ts_gt20y_80pc_1981_2015, 1981, 2015)
+# te_1981_2015 <- te_1981_2015 %>% left_join(te_mk_1981_2015, by = c("Station", "year_start", "year_end"))
+
+te_1981_2015 <- te_1981_2015 %>% left_join(test_estimates_mk(ts_gt20y_80pc_1981_2015, 1981, 2015), by = c("Station", "year_start", "year_end"))
+te_1986_2015 <- te_1986_2015 %>% left_join(test_estimates_mk(ts_gt20y_80pc_1986_2015, 1986, 2015), by = c("Station", "year_start", "year_end"))
+te_1991_2015 <- te_1991_2015 %>% left_join(test_estimates_mk(ts_gt20y_80pc_1991_2015, 1991, 2015), by = c("Station", "year_start", "year_end"))
+
+
+
+
+#' 
+#' 
+#' #### Add test results to spatial summaries
+#' 
+#' It would be useful to display these trends spatially. To do this we will need to add the trend estimates and p-values to the metadata table from earlier.
+#' 
+## ----add corr test results to df----------------------------------------------------------------------------
+# Join these with the statistical summary df:
+te_summaries <- rbind(te_1981_2015, te_1986_2015, te_1991_2015) %>% 
+  arrange(Station, year_start, year_end) %>% 
+  full_join(x = rx1hr_summary_gt20y_all) %>% 
+  rename(trend = estimate)
+
+
+#' 
+#' These tests results show that **`r as.integer(te_1981_2015 %>% filter(p.value <= 0.05) %>% ungroup() %>% count())` of the `r as.integer(te_1981_2015 %>% ungroup() %>% count())` stations have significant trends** for the period **1981 to 2015**. Of these, **`r as.integer(te_1981_2015 %>% filter(p.value <= 0.05, estimate > 0) %>% ungroup() %>% count())` were positive trends**, while **`r as.integer(te_1981_2015 %>% filter(p.value <= 0.05, estimate < 0) %>% ungroup() %>% count())` were negative**. Fewer stations exhibit significant trends for the shorter duration periods of 1986-2015 and 1991-2015, as shown in the table below.
+#' 
+## ----table of statistics------------------------------------------------------------------------------------
+# create table of summary statistics for the three time periods tested
+# e.g. layout:
+#   time period; n_stations; pos_trend; sig_pos_trend; neg_trend; sig_neg_trend
+
+# wrap this in a function for start/end years:
+te_table <- te_summaries %>% 
+  # filter(year_start == oldest, year_end == newest) %>% 
+  mutate(time_period = paste(year_start,year_end,sep="-")) %>% 
+  group_by(time_period) %>% 
+  summarise(n_total = n(),
+            n_pos = sum(trend > 0),
+            n_pos_sig = sum(trend > 0 & p.value <= 0.05),
+            n_pos_sig_pc = round(100 * n_pos_sig / n_total, digits = 1),
+            n_neg = sum(trend < 0),
+            n_neg_sig = sum(trend < 0 & p.value <= 0.05),
+            n_neg_sig_pc = round(100 * n_neg_sig / n_total, digits = 1),
+            ratio_pos_neg_sig = round(n_pos_sig / n_neg_sig, digits = 2)
+            )
+
+# Using kable:
+te_table %>%
+  kable(caption = "Trends and significant trends in Rx1hr data over Australia",
+        col.names = c("Period", "Stations", 
+                      "Positive Trend", "Significant\nPositive Trend", 
+                      "Proportion Significant\nPositive Trend (%)",
+                      "Negative Trend", "Significant\nNegative Trend", 
+                      "Proportion Significant\nNegative Trend (%)",
+                      "Ratio +ve Significant Trend /\n-ve Significant Trend"),
+        format = "html", align = "c")
+
+# Using gt:
+te_table %>%
+  gt(auto_align = F, rowname_col = "time_period") %>%
+  cols_label(time_period = "Period", n_total = "Stations",
+             n_pos = "Positive Trend",
+             n_pos_sig = "Significant\nPositive Trend",
+             n_pos_sig_pc = "Proportion Significant\nPositive Trend (%)",
+             n_neg = "Negative Trend",
+             n_neg_sig = "Significant\nNegative Trend",
+             n_neg_sig_pc = "Proportion Significant\nNegative Trend (%)",
+             ratio_pos_neg_sig = "Ratio +ve Significant Trend /\n-ve Significant Trend")
+
+
+## Now using the MK test for significance:
+te_table_mk <- te_summaries %>% 
+  # filter(year_start == oldest, year_end == newest) %>% 
+  mutate(time_period = paste(year_start,year_end,sep="-")) %>% 
+  group_by(time_period) %>% 
+  summarise(n_total = n(),
+            n_pos = sum(trend > 0),
+            n_pos_sig = sum(trend > 0 & p.value_mk <= 0.05),
+            n_pos_sig_pc = round(100 * n_pos_sig / n_total, digits = 1),
+            n_neg = sum(trend < 0),
+            n_neg_sig = sum(trend < 0 & p.value_mk <= 0.05),
+            n_neg_sig_pc = round(100 * n_neg_sig / n_total, digits = 1),
+            ratio_pos_neg_sig = round(n_pos_sig / n_neg_sig, digits = 2)
+            )
+
+# Using kable:
+te_table_mk %>%
+  kable(caption = "Trends and significant trends (via M-K test) in Rx1hr data over Australia",
+        col.names = c("Period", "Stations", 
+                      "Positive Trend", "Significant\nPositive Trend", 
+                      "Proportion Significant\nPositive Trend (%)",
+                      "Negative Trend", "Significant\nNegative Trend", 
+                      "Proportion Significant\nNegative Trend (%)",
+                      "Ratio +ve Significant Trend /\n-ve Significant Trend"),
+        format = "html", align = "c")
+
+# Using gt:
+te_table_mk %>%
+  gt(auto_align = F, rowname_col = "time_period") %>%
+  cols_label(time_period = "Period", n_total = "Stations",
+             n_pos = "Positive Trend",
+             n_pos_sig = "Significant\nPositive Trend",
+             n_pos_sig_pc = "Proportion Significant\nPositive Trend (%)",
+             n_neg = "Negative Trend",
+             n_neg_sig = "Significant\nNegative Trend",
+             n_neg_sig_pc = "Proportion Significant\nNegative Trend (%)",
+             ratio_pos_neg_sig = "Ratio +ve Significant Trend /\n-ve Significant Trend")
+
+
+
+#' 
+#' 
+#' 
+#' 
+#' #### Placing trend magnitudes and significance on a map
+#' 
+#' First plot the numeric trend values in mm per year:
+#' 
+## ----trend maps---------------------------------------------------------------------------------------------
+# plot the linear trend values:
+plot_station_stats(
+  select(filter(te_summaries, year_start == 1981, year_end == 2015), Longitude, Latitude, trend),
+  stat = "trend", aus_lon_limits, aus_lat_limits) +
+  geom_point(shape = 2) +
+  # scale_colour_continuous()
+  # scale_colour_gradient2(low = muted("brown"), high = muted("darkgreen"))
+  # scale_colour_gradient(name = "trend\n(mm/year)", low = "red", high = "navyblue")
+  scale_color_gradient2(name = "trend\n(mm/year)", low = "red", midpoint = 0,
+                        mid = "white", high = "blue", space="Lab")
+  
+
+
+#' 
+#' I think this has limited usefulness; it doesn't supply much context around whether these trend magnitudes are significant or meaningful.
+#' 
+#' #### Plotting trend significance
+#' 
+#' Write a function to plot up trend magnitudes, as well as locations where the trends are significant.
+#' 
+## ----function to map trends---------------------------------------------------------------------------------
+
+plot_rx1day_trends <- function(df, oldest = 1981, newest = 2015,
+                               type = "location",
+                               sig_only = FALSE,
+                               sig_type = c("t", "MK"),
+                               # facet = F,
+                               block = c("annual", "seasonal", "monthly"),
+                               trend_period = c("decade", "year"),
+                               domain = c("aus", "vic", "syd", "seq")) {
+
+  df <- df %>% filter(year_start == oldest, year_end == newest)
+  
+  trend_period <- match.arg(trend_period)
+  sig_type <- match.arg(sig_type)
+  block <- match.arg(block)
+  domain <- match.arg(domain)
+
+  if (trend_period == "decade") {
+    df <- df %>% mutate(trend = trend * 10)
+    trend_label <- "Trend\n(mm/decade)"
+  } else {
+    trend_label <- "Trend\n(mm/year)"
+  }
+  
+  if (sig_type == "MK") {
+    p_var <- sym("p.value_mk")
+    sig_label <- "Mann-Kendall"
+  } else {
+    if (sig_type == "t") {
+      p_var <- sym("p.value")
+      sig_label <- "t-test"
+    } else {
+      stop("Invalid value for 'sig_type': Must be one of 'MK', 't'")
+    }
+  }
+
+  if (domain == "aus") {
+    lon_lims <- aus_lon_limits
+    lat_lims <- aus_lat_limits
+    dom <- "Australia"
+  }
+  if (domain == "vic") {
+    lon_lims <- vic_lon_limits
+    lat_lims <- vic_lat_limits
+    dom <- "Victoria"
+  }
+  if (domain == "syd") {
+    lon_lims <- syd_lon_limits
+    lat_lims <- syd_lat_limits
+    dom <- "Sydney"
+  }
+  if (domain == "seq") {
+    lon_lims <- seq_lon_limits
+    lat_lims <- seq_lat_limits
+    dom <- "SE Qld"
+  }
+  
+    
+  baseplot <- df %>% ungroup() %>% 
+    filter(trend > 0, !!p_var > 0.05) %>% 
+    ggplot(aes(x = Longitude, y = Latitude, size = abs(trend))) +
+    annotation_map(map_data("worldHires"), fill = "antiquewhite", col = "grey25") +
+    coord_sf(xlim = lon_lims, ylim = lat_lims, expand = FALSE) +
+    theme(panel.background = element_rect(fill = "lightsteelblue1")) 
+
+  if (type == "magnitude" || type == "m") {
+    
+    if (sig_only) {
+    
+      plot_final <- baseplot +
+        geom_point(data = filter(df, trend < 0, !!p_var <= 0.05),
+                   shape = 25, alpha = 0.65, fill = "red", colour = "red") +
+        geom_point(data = filter(df, trend > 0, !!p_var <= 0.05),
+                   shape = 24, alpha = 0.65, fill = "navyblue", colour = "navyblue") +
+        ggtitle(paste0("Significant linear trends in ",block," Rx1hr: ", dom),
+                subtitle = paste0("Period ",oldest,"-",newest, " via ", sig_label))
+      
+    } else {
+      
+      plot_final <- baseplot +
+        geom_point(shape = 2, alpha = 0.5, colour = "navyblue") +
+        geom_point(data = filter(df, trend < 0, !!p_var > 0.05),
+                   shape = 6, alpha = 0.5, colour = "red") +
+        geom_point(data = filter(df, trend < 0, !!p_var <= 0.05),
+                   shape = 25, alpha = 0.65, fill = "red", colour = "red") +
+        geom_point(data = filter(df, trend > 0, !!p_var <= 0.05),
+                   shape = 24, alpha = 0.65, fill = "navyblue", colour = "navyblue") +
+        ggtitle(paste0("Linear trends in ",block," Rx1hr: ", dom),
+                subtitle = paste0("Period ",oldest,"-",newest, " via ", sig_label))
+      
+    }
+    
+  } else if (type == "location" || type == "l") {
+    
+    if (sig_only) {
+    
+      plot_final <- baseplot + 
+        geom_point(data = filter(df, trend < 0, !!p_var <= 0.05),
+                   shape = 25, alpha = 0.65, size = 1.5, fill = "red", colour = "red") +
+        geom_point(data = filter(df, trend > 0, !!p_var <= 0.05),
+                   shape = 24, alpha = 0.65, size = 1.5, fill = "navyblue", colour = "navyblue") +
+        ggtitle(paste0("Significant linear trends in ",block," Rx1hr: ", dom),
+                subtitle = paste0("Period ",oldest,"-",newest, " via ", sig_label))
+      
+    } else {
+      
+      plot_final <- baseplot + 
+        geom_point(shape = 2, alpha = 0.5, size = 1.5, colour = "navyblue") +
+        geom_point(data = filter(df, trend < 0, !!p_var > 0.05),
+                   shape = 6, alpha = 0.5, size = 1.5, colour = "red") +
+        geom_point(data = filter(df, trend < 0, !!p_var <= 0.05),
+                   shape = 25, alpha = 0.65, size = 1.5, fill = "red", colour = "red") +
+        geom_point(data = filter(df, trend > 0, !!p_var <= 0.05),
+                   shape = 24, alpha = 0.65, size = 1.5, fill = "navyblue", colour = "navyblue") +
+        ggtitle(paste0("Linear trends in ",block," Rx1hr: ", dom),
+                subtitle = paste0("Period ",oldest,"-",newest, " via ", sig_label))
+      
+    }
+    
+  } else {
+    
+    stop("Invalid value for 'type': Must be one of 'location', 'magnitude', 'l', 'm'")
+    
+  }
+  
+  plot_final + 
+        labs(size = trend_label)
+  
+}
+
+# plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "magnitude", sig_only = F, sig_type = "MK")
+# plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "location", sig_only = F, sig_type = "MK")
+# plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "location", sig_only = T)
+# plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "location", sig_only = T, sig_type = "MK")
+
+#' 
+#' The first tranche of plots cover the significant trends identified using a student's t-test:
+#' 
+## ----trend maps manually, fig.width=12, fig.height=6--------------------------------------------------------
+
+# plots for 1981-2015
+pt_8115_loc <-     plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "location", sig_only = F)
+pt_8115_loc_sig <- plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "l", sig_only = T)
+pt_8115_mag <-     plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "magnitude", sig_only = F)
+pt_8115_mag_sig <- plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "m", sig_only = T)
+
+pt_8115_loc + pt_8115_mag
+pt_8115_loc_sig + pt_8115_mag_sig
+pt_8115_loc + pt_8115_loc_sig
+pt_8115_mag + pt_8115_mag_sig
+
+# plots for 1986-2015
+pt_8615_loc <-     plot_rx1day_trends(te_summaries, oldest = 1986, newest = 2015, type = "location", sig_only = F)
+pt_8615_loc_sig <- plot_rx1day_trends(te_summaries, oldest = 1986, newest = 2015, type = "l", sig_only = T)
+pt_8615_mag <-     plot_rx1day_trends(te_summaries, oldest = 1986, newest = 2015, type = "magnitude", sig_only = F)
+pt_8615_mag_sig <- plot_rx1day_trends(te_summaries, oldest = 1986, newest = 2015, type = "m", sig_only = T)
+
+pt_8615_loc + pt_8615_mag
+pt_8615_loc_sig + pt_8615_mag_sig
+pt_8615_loc + pt_8615_loc_sig
+pt_8615_mag + pt_8615_mag_sig
+
+# plots for 1991-2015
+pt_9115_loc <-     plot_rx1day_trends(te_summaries, oldest = 1991, newest = 2015, type = "location", sig_only = F)
+pt_9115_loc_sig <- plot_rx1day_trends(te_summaries, oldest = 1991, newest = 2015, type = "l", sig_only = T)
+pt_9115_mag <-     plot_rx1day_trends(te_summaries, oldest = 1991, newest = 2015, type = "magnitude", sig_only = F)
+pt_9115_mag_sig <- plot_rx1day_trends(te_summaries, oldest = 1991, newest = 2015, type = "m", sig_only = T)
+
+pt_9115_loc + pt_9115_mag
+pt_9115_loc_sig + pt_9115_mag_sig
+pt_9115_loc + pt_9115_loc_sig
+pt_9115_mag + pt_9115_mag_sig
+
+
+
+#' 
+#' And now, the same plots but instead using the Mann-Kendall test for significance:
+#' 
+## ----trend maps manually MK, fig.width=12, fig.height=6-----------------------------------------------------
+
+# plots for 1981-2015
+pt_8115_loc_mk <-     plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "location", sig_only = F, sig_type = "MK")
+pt_8115_loc_sig_mk <- plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "l", sig_only = T, sig_type = "MK")
+pt_8115_mag_mk <-     plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "magnitude", sig_only = F, sig_type = "MK")
+pt_8115_mag_sig_mk <- plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "m", sig_only = T, sig_type = "MK")
+
+pt_8115_loc_mk + pt_8115_mag_mk
+pt_8115_loc_sig_mk + pt_8115_mag_sig_mk
+pt_8115_loc_mk + pt_8115_loc_sig_mk
+pt_8115_mag_mk + pt_8115_mag_sig_mk
+
+# plots for 1986-2015
+pt_8615_loc_mk <-     plot_rx1day_trends(te_summaries, oldest = 1986, newest = 2015, type = "location", sig_only = F, sig_type = "MK")
+pt_8615_loc_sig_mk <- plot_rx1day_trends(te_summaries, oldest = 1986, newest = 2015, type = "l", sig_only = T, sig_type = "MK")
+pt_8615_mag_mk <-     plot_rx1day_trends(te_summaries, oldest = 1986, newest = 2015, type = "magnitude", sig_only = F, sig_type = "MK")
+pt_8615_mag_sig_mk <- plot_rx1day_trends(te_summaries, oldest = 1986, newest = 2015, type = "m", sig_only = T, sig_type = "MK")
+
+pt_8615_loc_mk + pt_8615_mag_mk
+pt_8615_loc_sig_mk + pt_8615_mag_sig_mk
+pt_8615_loc_mk + pt_8615_loc_sig_mk
+pt_8615_mag_mk + pt_8615_mag_sig_mk
+
+# plots for 1991-2015
+pt_9115_loc_mk <-     plot_rx1day_trends(te_summaries, oldest = 1991, newest = 2015, type = "location", sig_only = F, sig_type = "MK")
+pt_9115_loc_sig_mk <- plot_rx1day_trends(te_summaries, oldest = 1991, newest = 2015, type = "l", sig_only = T, sig_type = "MK")
+pt_9115_mag_mk <-     plot_rx1day_trends(te_summaries, oldest = 1991, newest = 2015, type = "magnitude", sig_only = F, sig_type = "MK")
+pt_9115_mag_sig_mk <- plot_rx1day_trends(te_summaries, oldest = 1991, newest = 2015, type = "m", sig_only = T, sig_type = "MK")
+
+pt_9115_loc_mk + pt_9115_mag_mk
+pt_9115_loc_sig_mk + pt_9115_mag_sig_mk
+pt_9115_loc_mk + pt_9115_loc_sig_mk
+pt_9115_mag_mk + pt_9115_mag_sig_mk
+
+
+
+#' And now, directly comparing the t-test against the Mann-Kendall results for selected plots:
+#' 
+## ----compare spatial test results, fig.width=12, fig.height=6-----------------------------------------------
+# Period 1981-2015 only:
+# location
+pt_8115_loc + pt_8115_loc_mk
+# location sig-only
+pt_8115_loc_sig + pt_8115_loc_sig_mk
+# magnitude-all
+pt_8115_mag + pt_8115_mag_mk
+# magnitude sig-only
+pt_8115_mag_sig + pt_8115_mag_sig_mk
+
+
+#' 
+#' ##### Other domains: Sydney and Victoria
+#' 
+#' Here we zoom in to examine more closely the regions around Sydney, south-east Queensland, and Victoria for the period 1981-2015.
+#' 
+#' **Sydney:**
+#' 
+## ----spatial trends for SYD, fig.width=12, fig.height=6-----------------------------------------------------
+# plots for 1981-2015
+pt_8115_loc_mk_syd <-     plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "location", sig_only = F, sig_type = "MK", domain = "syd")
+pt_8115_loc_sig_mk_syd <- plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "l", sig_only = T, sig_type = "MK", domain = "syd")
+pt_8115_mag_mk_syd <-     plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "magnitude", sig_only = F, sig_type = "MK", domain = "syd")
+pt_8115_mag_sig_mk_syd <- plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "m", sig_only = T, sig_type = "MK", domain = "syd")
+
+pt_8115_loc_mk_syd + pt_8115_mag_mk_syd
+pt_8115_loc_sig_mk_syd + pt_8115_mag_sig_mk_syd
+pt_8115_loc_mk_syd + pt_8115_loc_sig_mk_syd
+pt_8115_mag_mk_syd + pt_8115_mag_sig_mk_syd
+
+#' 
+#' **South-East Queensland:**
+## ----spatial trends for seq, fig.width=12, fig.height=6-----------------------------------------------------
+# plots for 1981-2015
+pt_8115_loc_mk_seq <-     plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "location", sig_only = F, sig_type = "MK", domain = "seq")
+pt_8115_loc_sig_mk_seq <- plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "l", sig_only = T, sig_type = "MK", domain = "seq")
+pt_8115_mag_mk_seq <-     plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "magnitude", sig_only = F, sig_type = "MK", domain = "seq")
+pt_8115_mag_sig_mk_seq <- plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "m", sig_only = T, sig_type = "MK", domain = "seq")
+
+pt_8115_loc_mk_seq + pt_8115_mag_mk_seq
+pt_8115_loc_sig_mk_seq + pt_8115_mag_sig_mk_seq
+pt_8115_loc_mk_seq + pt_8115_loc_sig_mk_seq
+pt_8115_mag_mk_seq + pt_8115_mag_sig_mk_seq
+
+#' 
+#' 
+#' **Victoria:**
+## ----spatial trends for VIC, fig.width=12, fig.height=6-----------------------------------------------------
+# plots for 1981-2015
+pt_8115_loc_mk_vic <-     plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "location", sig_only = F, sig_type = "MK", domain = "vic")
+pt_8115_loc_sig_mk_vic <- plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "l", sig_only = T, sig_type = "MK", domain = "vic")
+pt_8115_mag_mk_vic <-     plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "magnitude", sig_only = F, sig_type = "MK", domain = "vic")
+pt_8115_mag_sig_mk_vic <- plot_rx1day_trends(te_summaries, oldest = 1981, newest = 2015, type = "m", sig_only = T, sig_type = "MK", domain = "vic")
+
+pt_8115_loc_mk_vic + pt_8115_mag_mk_vic
+pt_8115_loc_sig_mk_vic + pt_8115_mag_sig_mk_vic
+pt_8115_loc_mk_vic + pt_8115_loc_sig_mk_vic
+pt_8115_mag_mk_vic + pt_8115_mag_sig_mk_vic
+
+#' 
+#' These domain-zoomed plots show an interesting pattern: the only significant trends in south-east Queensland are negative, whereas for the more southern regions shown around Sydney and over Victoria there are only positive significant trends. Nonetheless, when compared to the number of stations covering these regions, they still represent a minority.
+#' 
+#' 
+#' ## Examining seasonal GSDR-I data
+#' 
+#' Now we can extend the above to seasonal data from GSDR.
+#' 
+## ----load locations seasonal, message=FALSE-----------------------------------------------------------------
+Summary_Seasonal_Rx1hr_5min <- read_csv("GSDR/Indices_5min-postQC/TimeSeries/Seasonal/Summary/Summary_Seasonal_Rx1hr.csv")
+Summary_Seasonal_Rx1hr_1min <- read_csv("GSDR/Indices_1min-postQC/TimeSeries/Seasonal/Summary/Summary_Seasonal_Rx1hr.csv")
+
+
+#' 
+#' #### Time series completeness
+#' 
+#' ##### 5-minute records
+#' We will start with the 5-minute data:
+#' 
+## ----histogram of locations seasonal 5min-------------------------------------------------------------------
+ymax <- 115
+Summary_Seasonal_Rx1hr_5min %>% filter(DataThreshold == 0, NYears > 20) %>% group_by(Season) %>% 
+  ggplot(aes(x = Maximum)) +
+  geom_histogram(binwidth = 5, boundary = 0, colour = "darkgrey", fill = "brown", alpha = 0.7) +
+  ylim(0,ymax) +
+  facet_wrap(facets = vars(Season)) +
+  ggtitle("Occurence of seasonal maxima of Rx1hr (5 min data)",
+          subtitle = "Threshold of 0% completeness")
+
+Summary_Seasonal_Rx1hr_5min %>% filter(DataThreshold == 80, NYears > 20) %>% group_by(Season) %>% 
+  ggplot(aes(x = Maximum)) +
+  geom_histogram(binwidth = 5, boundary = 0, colour = "darkgrey", fill = "darkgreen", alpha = 0.7) +
+  ylim(0,ymax) +
+  facet_wrap(facets = vars(Season)) +
+  ggtitle("Occurence of seasonal maxima of Rx1hr (5 min data)",
+          subtitle = "Threshold of 80% completeness")
+
+
+#' Good to observe that the overall distribution of magnitudes doesn't diverge greatly between the raw and the thresholded data sets. In this case, we will stick with our 80% threshold completeness.
+#' 
+#' ##### 1-minute records
+#' 
+#' Now look at the 1-minute data:
+#' 
+## ----histogram of locations seasonal 1min-------------------------------------------------------------------
+ymax <- 20
+Summary_Seasonal_Rx1hr_1min %>% filter(DataThreshold == 0, NYears > 20) %>% group_by(Season) %>% 
+  ggplot(aes(x = Maximum)) +
+  geom_histogram(binwidth = 2.5, boundary = 0, colour = "darkgrey", fill = "brown", alpha = 0.7) +
+  ylim(0,ymax) +
+  facet_wrap(facets = vars(Season)) +
+  ggtitle("Occurence of seasonal maxima of Rx1hr",
+          subtitle = "Threshold of 0% completeness")
+
+#' It looks like we have very few (i.e. <5) stations with 20 years or more of record for any season --- and only 1 for seasons 1 and 4!
+#' 
+#' How many years do our 1-min stations have seasonal maximum records for?
+#' 
+#' 
+## ----histogram of locations seasonal 1min part2-------------------------------------------------------------
+# looks like we really don't have many 1min stations at all. Plot hist of nyears for stations:
+ymax <- 80
+Summary_Seasonal_Rx1hr_1min %>% filter(DataThreshold == 80) %>% group_by(Season) %>% 
+  ggplot(aes(x = NYears)) +
+  geom_histogram(binwidth = 1, boundary = 0, colour = "darkgrey", fill = "darkgreen", alpha = 0.7) +
+  ylim(0,ymax) +
+  facet_wrap(facets = vars(Season)) +
+  ggtitle("Histogram of station observation lengths for seasonal maxima of Rx1hr (1 min data)",
+          subtitle = "Threshold of 80% completeness")
+
+
+
+#' 
+#' As suspected, it looks as though very few of the 1-min data will be useful in the analysis of trends, and very few (if any) will be useful in analysing interannual variability.
+#' 
+#' #### Time series of seasonal maxima
+#' 
+#' 
+## ----read in seasonal_rx1hr---------------------------------------------------------------------------------
+# [from line 268]
+TimeSeries_Seasonal_Rx1hr_1min <- read_csv("GSDR/Indices_1min-postQC/TimeSeries/Seasonal/TimeSeries_Seasonal_Rx1hr.csv",
+col_types = cols(Folder = col_skip()))
+TimeSeries_Seasonal_Rx1hr_5min <- read_csv("GSDR/Indices_5min-postQC/TimeSeries/Seasonal/TimeSeries_Seasonal_Rx1hr.csv",
+col_types = cols(Folder = col_skip()))
+TimeSeries_Seasonal_Rx1hr <- bind_rows(TimeSeries_Seasonal_Rx1hr_1min, TimeSeries_Seasonal_Rx1hr_5min, .id = "DataSource") %>% 
+  mutate(DataSource = as.factor(ifelse(DataSource == 2,"5min","1min")))
+
+
+#' 
+## ----stats on seasonal_rx1hr--------------------------------------------------------------------------------
+# how many annual maxima does each station contain? Might best be presented as a histogram:
+seas_max_count <- TimeSeries_Seasonal_Rx1hr %>% 
+  group_by(Station, DataSource, Season) %>% 
+  summarise(n_maxima = n())
+# print summary statistics of number of annual max:
+summary(seas_max_count)
+
+#' 
+#' The median number of years for which annual maxima are available is only `r median(seas_max_count$n_maxima)`, so -- as it was for the annual time series -- more than half our data do not have sufficient length of record, even before considering appropriate completeness. 
+#' 
+## ----count of number of seasmax above thresholds------------------------------------------------------------
+# How many stations have at least 20 seasonal max?
+n_gt_20 <- ungroup(seas_max_count) %>% filter(n_maxima >= 20) %>% summarise(n()) / 4
+# How about at least 30 years of maxima?
+n_gt_30 <- ungroup(seas_max_count) %>% filter(n_maxima >= 30) %>% summarise(n()) / 4
+
+#' There are `r as.integer(n_gt_20)` stations with 20 or more seasonal maxima values recorded, and `r as.integer(n_gt_30)` stations with 30 or more values.
+#' 
+#' We can plot this information in a histogram:
+## ----plot histogram of number of seasmax for seasonal_rx1hr-------------------------------------------------
+# plot histogram of number of seasonal maxima:
+seas_max_count %>% 
+  # ggplot(aes(x = n_maxima)) +
+  # geom_histogram(binwidth = 1, boundary = 0.5, colour = "darkgrey", fill = "orange", alpha = 0.85) +
+  ggplot(aes(x = n_maxima, fill = DataSource)) +
+  geom_histogram(binwidth = 1, boundary = 0.5, colour = "darkgrey", alpha = 0.85) +
+  geom_vline(xintercept = 19.5, linetype = 2) +
+  # annotate("text", x = 21.5, y = 90, size = 3, angle = 270,
+  #          label = paste0("20+ years: n = ",
+  #                         ungroup(seas_max_count) %>% filter(n_maxima >= 20) %>%
+  #                           summarise(n()) %>% as.integer())) +
+  geom_vline(xintercept = 29.5, linetype = 4) +
+  # annotate("text", x = 31.5, y = 90, size = 3, angle = 270,
+  #          label = paste0("30+ years: n = ",
+  #                         ungroup(seas_max_count) %>% filter(n_maxima >= 30) %>%
+  #                           summarise(n()) %>% as.integer())) +
+  # scale_x_continuous(expand = c(0, 1), name = "number of seasonal maxima at station") +
+  scale_y_continuous(expand = c(0, 1), name = "number of stations") +
+  ggtitle("Histogram of number of seasonal maxima at observation stations") +
+  facet_wrap(~ Season)
+
+#' #### Seasonal record completeness
+#' 
+#' As we can see from the figure above displaying the location of the stations with adequate record lengths, not all of them have fully complete records -- that is to say they may have data missing from each season, even if they have hourly maximum values recorded.
+#' 
+#' We need to create a subset of stations from our seasonal maxima data that have a sufficient number of records.
+#' 
+## ----create subsets for 20+ and 30+ seasmax records---------------------------------------------------------
+seasmax_1hr_gt_20 <- seas_max_count %>% group_by(Season) %>% filter(n_maxima >= 20)
+seasmax_1hr_gt_30 <- seas_max_count %>% group_by(Season) %>% filter(n_maxima >= 30)
+
+#' 
+#' Now we can extract those stations from the time series:
+#' 
+## ----filter stations over thresholds seasonal---------------------------------------------------------------
+# get time series for stations with 20+ years
+ts_gt20_seas <- seasmax_1hr_gt_20 %>% select(Station, Season) %>% 
+  left_join(TimeSeries_Seasonal_Rx1hr, by = c("Station", "Season"))
+
+# get time series for stations with 30+ years
+ts_gt30_seas <- seasmax_1hr_gt_30 %>% select(Station, Season) %>% 
+  left_join(TimeSeries_Seasonal_Rx1hr, by = c("Station", "Season"))
+
+#' 
+#' Now we can look in more detail at the stations themselves, and filter out years with an unsatisfactory level of missing data. To get a feel for what kinds of values we see in this data set, let's do another histogram:
+#' 
+## ----histogram of year completeness seasonal, fig.width=12, fig.height=6------------------------------------
+# calculate mean level of completeness for each station:
+completeness_gt20_seas <- ts_gt20_seas %>% group_by(Station, Season) %>% 
+  summarise(mean_completeness = mean(Completeness, na.rm = T)) 
+completeness_gt30_seas <- ts_gt30_seas %>% group_by(Station, Season) %>% 
+  summarise(mean_completeness = mean(Completeness, na.rm = T)) 
+# create histograms:
+histogram_gt20_seas <- completeness_gt20_seas %>% 
+  ggplot(aes(x = mean_completeness)) +
+  geom_histogram(binwidth = 1, boundary = 0, colour = "darkgrey", fill = "darkgreen", alpha = 0.65) +
+  geom_vline(xintercept = 80, linetype = 2) +
+  # annotate("text", x = 81.5, y = 33, size = 3, angle = 270,
+  #          label = paste0("80+%:  n = ",
+  #                         completeness_gt20_seas %>% filter(mean_completeness >= 80) %>%
+  #                           summarise(n()) %>% as.integer())) +
+  scale_x_continuous(expand = c(0, 1), name = "mean completeness of seasonal maxima years (%)") +
+  scale_y_continuous(expand = c(0, 1), name = "number of stations")
+histogram_gt20_seas + 
+  ggtitle("Mean annual completeness percentage of seasonal maxima at observation stations",
+          subtitle = "Stations with 20+ years of seasonal maxima available - all seasons combined")
+histogram_gt20_seas +
+  ggtitle("Mean annual completeness percentage of seasonal maxima at observation stations",
+          subtitle = "Stations with 20+ years of seasonal maxima available") + 
+  facet_wrap(~ Season)
+
+# 30 years:
+histogram_gt30_seas <- completeness_gt30_seas %>% 
+  ggplot(aes(x = mean_completeness)) +
+  geom_histogram(binwidth = 1, boundary = 0, colour = "darkgrey", fill = "darkblue", alpha = 0.5) +
+  geom_vline(xintercept = 80, linetype = 2) +
+  # annotate("text", x = 81.5, y = 24, size = 3, angle = 270,
+  #          label = paste0("80+%:  n = ",
+  #                         completeness_gt30_seas %>% filter(mean_completeness >= 80) %>%
+  #                           summarise(n()) %>% as.integer())) +
+  scale_x_continuous(expand = c(0, 1), name = "mean completeness of seasonal maxima years (%)") +
+  scale_y_continuous(expand = c(0, 1), name = "number of stations")
+histogram_gt30_seas +
+  ggtitle("Mean seasonal completeness percentage of seasonal maxima at observation stations",
+          subtitle = "Stations with 30+ years of seasonal maxima available - all seasons combined")
+histogram_gt30_seas +
+  ggtitle("Mean seasonal completeness percentage of seasonal maxima at observation stations",
+          subtitle = "Stations with 30+ years of seasonal maxima available") + 
+  facet_wrap(~ Season)
+
+
+#' 
+#' #### Trends and significance testing
+#' 
+## ----write function filtering records within a certain period for seasonal data, eval=FALSE, include=FALSE----
+## # from 780
+## 
+## valid_years_in_period_seasonal <- function(df = ts_gt20y_80pc,
+##                                            Nyears = 20,
+##                                            # threshold = 80,
+##                                            oldest = 1981, newest = 2015) {
+##   df <- df %>%
+##     # filter out records before $oldest and after $newest
+##     filter(Year >= oldest, Year <= newest)
+## 
+##   # check that we have an adequate number of records (Nyears+):
+##   n_per_station <- df %>%
+##     ungroup() %>% group_by(Station) %>%
+##     summarise(n_years = n()) %>%
+##     filter(n_years >= Nyears)
+## 
+##   if (nrow(n_per_station) > 0) {
+##     # extract stations with adequate records:
+##     n_per_station %>% select(Station) %>%
+##       left_join(df, by = "Station") %>%
+##       group_by(Station) %>% arrange(Station) %>%
+##       mutate(ts_max_index = if_else(Value == max(Value, na.rm = T), "max", NA_character_),
+##              Year = as_date(paste0(Year,"-01-01"))) %>%
+##       time_complete(Year, time_by = "year", fill = list(Value = NA)) %>%
+##       mutate(g = cur_group_id())
+##   } else {
+##     stop("No stations meet the criteria")
+##   }
+## 
+## }
+## 
+
+#' 
+#' 
+## ----get seasonal linear trends, eval=FALSE, include=FALSE--------------------------------------------------
+## 
+## # test_estimates_seas <- function(df, oldest = 1981, newest = 2015) {
+## #
+## #   require(broom)
+## #   df %>%
+## #     mutate(Year = year(Year)) %>%
+## #     group_by(Station, Season) %>%
+## #     do(tidy(lm(Value ~ Year, .))) %>%
+## #     filter(term == "Year") %>%
+## #     select(-term) %>%
+## #     mutate(p.value = round(p.value, digits = 5)) %>%
+## #     mutate(year_start = oldest, year_end = newest, .after = Station) %>%
+## #     arrange(Station)
+## #
+## # }
+## #
+## #
+## # ts_gt20y_80pc_1981_2015 <- valid_years_in_period(ts_gt20_seas, oldest = 1981, newest = 2015)
+## #
+## # te_1981_2015_seas <- test_estimates_seas(ts_gt20_seas, 1981, 2015)
+## # ts_gt20_seas
+
+#' 

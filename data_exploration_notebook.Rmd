@@ -132,11 +132,15 @@ library(tmaptools)
 api_key <- 'AIzaSyDJeNzaBarybVQ7G4-eZmgD02xAtyOiuBc'
 register_google(api_key)
 
+# Stasia maps API key:
+api_key_stadia <- "1aef2dee-2bbb-49d1-86e4-d76861f5e2ca"
+register_stadiamaps(api_key_stadia)
+
 rbind(as.numeric(paste(geocode_OSM("Sydney")$bbox)))
 nsw <- c(left = 140, right = 154, bottom = -38, top = -28)
 
 # nsw_map <- ggmap(get_map(nsw, maptype = "terrain-background", zoom = 6, col = "bw"))
-nsw_map <- ggmap(get_map(nsw, maptype = "toner-lite", zoom = 6))
+nsw_map <- ggmap(get_map(nsw, maptype = "stamen_toner_lite", source = "stadia", zoom = 6))
 
 nsw_map +
 geom_point(data = metacopy, aes(x = Longitude, y = Latitude, col = Agency), alpha = 0.6)
@@ -146,7 +150,7 @@ nsw_data <- metacopy %>% filter(State == "NSW" | State == "ACT" | State == "OTHE
 nsw_map +
 geom_point(data = nsw_data, aes(x = Longitude, y = Latitude, col = OrganisationName), alpha = 0.6)
 
-nsw_map <- ggmap(get_map(nsw, maptype = "toner-lite", zoom = 6), base_layer = ggplot(data = nsw_data, aes(Longitude, Latitude)))
+nsw_map <- ggmap(get_map(nsw, maptype = "stamen_toner_lite", source = "stadia", zoom = 6), base_layer = ggplot(data = nsw_data, aes(Longitude, Latitude)))
 
 nsw_map +
   geom_point(aes(col = OrganisationName), alpha = 0.6)
@@ -166,7 +170,7 @@ syd_metacopy <- metacopy %>%
   filter(Longitude > syd_domain['left'] & Longitude < syd_domain['right'] & 
            Latitude < syd_domain['top'] & Latitude > syd_domain['bottom'])
 
-syd_map <- ggmap(get_map(syd_domain, maptype = "toner-lite", zoom = 8), 
+syd_map <- ggmap(get_map(syd_domain, maptype = "stamen_toner_lite", source = "stadia", zoom = 8), 
                  base_layer = ggplot(data = syd_metacopy, aes(Longitude, Latitude)))
 syd_map +
   geom_point(aes(col = OrganisationName), alpha = 0.6)
@@ -224,6 +228,7 @@ library(ggmapstyles)
 #                 base_layer = ggplot(data = syd_metacopy, aes(Longitude, Latitude)))
 syd_centred <- c(lon = (syd_domain['left'] + syd_domain['right'])/2, lon = (syd_domain['top'] + syd_domain['bottom'])/2)
 
+snazzy <- get_snazzymap(syd_centred, mapRef = "https://snazzymaps.com/style/115/white-landscape", zoom = 7)
 white_map <- ggmap(get_snazzymap(syd_centred, mapRef = "https://snazzymaps.com/style/115/white-landscape", zoom = 7),
                    base_layer = ggplot(data = syd_metacopy, aes(Longitude, Latitude)))
 
